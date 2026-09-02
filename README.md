@@ -34,7 +34,7 @@ backend, and it is how the design was done before the panel shipped.
 ```bash
 pip3 install -r requirements.txt
 python3 tools/preview.py --scale 2        # writes local/preview-2x.png
-python3 tools/preview.py --live --view focus
+python3 tools/preview.py --live --view next
 ```
 
 `--live` needs `MINDWTR_URL` and `MINDWTR_TOKEN` in `.env`; without it, it
@@ -48,6 +48,17 @@ device-tree overlay for touch, and wiring.
 ```bash
 python3 -m panel.app
 ```
+
+## What it shows
+
+`PANEL_VIEW=focus` is the default and it is a compound view: the tasks starred
+for today first, a heavy rule, then next actions filling whatever rows are left.
+Six rows fit. A `next`-only panel would be showing about a tenth of the backlog
+in arbitrary order; leading with the deliberate choice and letting the rest fill
+in is the difference between a planner and a random sample.
+
+Nothing starred is not a failure state — the panel is then simply next actions,
+so the focus flag earns its place without being load-bearing.
 
 ## Configuration
 

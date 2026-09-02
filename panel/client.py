@@ -60,17 +60,22 @@ class MindwtrClient:
             raise MindwtrError("complete %s: HTTP %s" % (task_id, r.status_code))
 
     def fetch(self, view: str, limit: int) -> List[Task]:
-        """One view's worth of tasks, with project and area names joined in.
+        """One panel's worth of tasks, with project and area names joined in.
 
-        `focus` is not a status — it is the isFocusedToday flag, so it filters
-        differently from the rest.
+        `focus` is not a status — it is the isFocusedToday flag — and it is also
+        the one compound view: what you chose for today, then next actions
+        filling whatever rows are left. A wall panel that is blank whenever you
+        forgot to star anything is worse than no panel, and this way the focus
+        flag earns its place without being load-bearing.
         """
-        params: Dict[str, Any] = {"limit": limit}
         if view == "focus":
-            params["isFocusedToday"] = "true"
-        else:
-            params["status"] = view
+            focused = self._list({"isFocusedToday": "true", "limit": limit})
+            seen = {t.id for t in focused}
+            rest = self._list({"status": "next", "limit": limit})
+            return focused + [t for t in rest if t.id not in seen]
+        return self._list({"status": view, "limit": limit})
 
+    def _list(self, params: Dict[str, Any]) -> List[Task]:
         raw = self._get("/v1/tasks", params).get("tasks", [])
         projects = {p["id"]: p for p in self._get("/v1/projects").get("projects", [])}
         areas = {a["id"]: label(a) for a in self._get("/v1/areas").get("areas", [])}

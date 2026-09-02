@@ -49,6 +49,22 @@ class TestRender(unittest.TestCase):
         self.assertNotEqual(fresh.tobytes(), stale.tobytes())
 
 
+class TestFocusRendering(unittest.TestCase):
+    def test_boundary_rule_is_drawn_between_focused_and_backlog(self):
+        split = [task(0, focused=True), task(1), task(2)]
+        flat = [task(0), task(1), task(2)]
+        self.assertNotEqual(
+            render(split, "focus").image.tobytes(),
+            render(flat, "focus").image.tobytes(),
+        )
+
+    def test_header_counts_focused_not_backlog(self):
+        one = render([task(0, focused=True)] + [task(i) for i in range(1, 9)], "focus")
+        two = render([task(0, focused=True), task(1, focused=True)]
+                     + [task(i) for i in range(2, 9)], "focus")
+        self.assertNotEqual(one.image.tobytes(), two.image.tobytes())
+
+
 class TestHitTesting(unittest.TestCase):
     def setUp(self):
         self.rendered = render([task(i) for i in range(ROWS)], "next")

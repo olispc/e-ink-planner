@@ -26,6 +26,12 @@ VIEW_TITLES = {
     "focus": "TODAY",
 }
 
+EMPTY_MESSAGES = {
+    "focus": "Nothing on today.",
+    "next": "Nothing next. Good.",
+    "inbox": "Inbox empty.",
+}
+
 
 @dataclass(frozen=True)
 class Hitbox:
@@ -90,8 +96,11 @@ def render(
     # --- header -----------------------------------------------------------
     d.text((MARGIN, 20), VIEW_TITLES.get(view, view.upper()), font=f.header, fill=BLACK)
     right = now.strftime("%a %-d %b")
-    if total:
-        right = "%d  ·  %s" % (total, right)
+    # In the focus view the useful number is what you chose for today, not the
+    # size of the backlog underneath it.
+    headline = sum(1 for t in visible if t.focused) if view == "focus" else total
+    if headline:
+        right = "%d  ·  %s" % (headline, right)
     d.text(
         (TEXT_RIGHT - _text_width(d, right, f.header_right), 21),
         right, font=f.header_right, fill=BLACK,
@@ -101,7 +110,7 @@ def render(
     # --- rows -------------------------------------------------------------
     hitboxes: List[Hitbox] = []
     if not visible:
-        message = "Nothing here. Good."
+        message = EMPTY_MESSAGES.get(view, "Nothing here.")
         d.text(
             ((WIDTH - _text_width(d, message, f.empty)) // 2, HEIGHT // 2 - 24),
             message, font=f.empty, fill=BLACK,
@@ -111,14 +120,13 @@ def render(
         hitboxes.append(Hitbox(task.id, y0, y0 + ROW_H))
 
         box_y = y0 + (ROW_H - BOX) // 2
-        d.rectangle([BOX_X, box_y, BOX_X + BOX, box_y + BOX], outline=BLACK, width=2)
-        if task.focused:
-            # Focused-today tasks get a filled corner rather than a separate
-            # column — one glance, no legend.
-            d.rectangle(
-                [BOX_X + 7, box_y + 7, BOX_X + BOX - 7, box_y + BOX - 7],
-                fill=BLACK,
-            )
+        # Emphasis is a heavier border, never a fill: a filled checkbox reads as
+        # "done" in every interface anyone has ever used, and this one is the
+        # tap target for completing the task.
+        d.rectangle(
+            [BOX_X, box_y, BOX_X + BOX, box_y + BOX],
+            outline=BLACK, width=4 if task.focused else 2,
+        )
 
         meta = _meta_line(task)
         title_y = y0 + (12 if meta else 20)
@@ -134,7 +142,13 @@ def render(
                 font=f.meta, fill=BLACK,
             )
         if i < len(visible) - 1:
-            d.line([(TEXT_X, y0 + ROW_H), (TEXT_RIGHT, y0 + ROW_H)], fill=BLACK)
+            # A heavier full-width rule marks where today's chosen work ends
+            # and the backlog filling the remaining rows begins.
+            boundary = task.focused and not visible[i + 1].focused
+            d.line(
+                [(MARGIN if boundary else TEXT_X, y0 + ROW_H), (TEXT_RIGHT, y0 + ROW_H)],
+                fill=BLACK, width=2 if boundary else 1,
+            )
 
     # --- footer -----------------------------------------------------------
     fy = HEIGHT - FOOTER_H

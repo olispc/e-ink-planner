@@ -23,6 +23,15 @@ panel redraws only when content changed. No animation, no cursor, no scrolling.
 network must show the last good list *labelled offline*, not an empty screen or
 stale data with no explanation. `Panel.stale_since` is what does this.
 
+**The default view is compound, not a filter.** `focus` means starred-today
+first, then next actions filling the remaining rows, with a heavy rule between.
+It exists because a `next`-only panel showed 6 of 56 tasks, and because a panel
+that goes blank whenever nothing is starred would not survive contact with a
+normal week.
+
+**Emphasis is never a fill.** The checkbox is the tap target for *completing* a
+task, so a filled box reads as done. Focused rows get a heavier border instead.
+
 **Taps are optimistic.** Redraw immediately from local state, then POST, then
 reconcile on the next poll. A tap that waits for the network feels broken at
 these refresh rates.

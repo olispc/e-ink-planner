@@ -43,7 +43,7 @@ class Config:
         return cls(
             url=os.environ.get("MINDWTR_URL", "http://127.0.0.1:8787").rstrip("/"),
             token=os.environ.get("MINDWTR_TOKEN", ""),
-            view=os.environ.get("PANEL_VIEW", "next"),
+            view=os.environ.get("PANEL_VIEW", "focus"),
             poll_seconds=int(os.environ.get("PANEL_POLL_SECONDS", "300")),
             display=os.environ.get("PANEL_DISPLAY", "png"),
             touch=os.environ.get("PANEL_TOUCH", "none"),
