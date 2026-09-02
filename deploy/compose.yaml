@@ -1,0 +1,31 @@
+# mindwtr-cloud: the sync server the Mac, the phone and the panel all talk to.
+# Runs on the Pi. Image is multi-arch, so linux/arm64 works.
+#
+#   cp .env.example .env && edit it
+#   docker compose up -d
+#
+# Upstream reference: github.com/dongdongbh/Mindwtr/tree/main/docker
+
+services:
+  mindwtr-cloud:
+    image: ghcr.io/dongdongbh/mindwtr-cloud:latest
+    container_name: mindwtr-cloud
+    restart: always
+    cpus: "1.0"
+    mem_limit: 512m
+    ports:
+      # Bound to all interfaces so the Mac and phone can reach it over
+      # Tailscale. Nothing is exposed to the internet — there is no port
+      # forward, and the tailnet is the only route in.
+      - "8787:8787"
+    environment:
+      - MINDWTR_CLOUD_AUTH_TOKENS=${MINDWTR_CLOUD_AUTH_TOKENS:?set this in .env}
+      - MINDWTR_CLOUD_CORS_ORIGIN=${MINDWTR_CLOUD_CORS_ORIGIN:-http://localhost:5173}
+    volumes:
+      - ./data:/app/cloud_data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8787/ready >/dev/null || curl -fsS http://localhost:8787/health >/dev/null"]
+      interval: 90s
+      timeout: 10s
+      retries: 3
+      start_period: 30s

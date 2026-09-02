@@ -1,0 +1,8 @@
+# Runtime deps for the panel renderer.
+# On the Pi, also: sudo apt install fonts-dejavu-core python3-pil python3-evdev
+Pillow>=10.0
+requests>=2.31
+
+# Pi only — installed there, not needed for layout work on a laptop:
+#   evdev>=1.6          reads GT911 touch events
+#   waveshare-epd       vendored from Waveshare's repo, not on PyPI

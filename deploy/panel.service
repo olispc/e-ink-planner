@@ -1,0 +1,23 @@
+# systemd unit for the panel renderer.
+#   sudo cp deploy/panel.service /etc/systemd/system/
+#   sudo systemctl enable --now panel
+[Unit]
+Description=E-ink Mindwtr panel
+# Needs the sync server up first; both live on this box.
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=oli
+WorkingDirectory=/home/oli/eink-planner
+ExecStart=/usr/bin/python3 -m panel.app
+Restart=always
+RestartSec=15
+# The panel keeps its last image with the power off, so a crash loop would
+# otherwise sit there showing confidently stale data with no clue why.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

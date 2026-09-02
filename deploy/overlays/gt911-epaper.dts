@@ -1,0 +1,60 @@
+/*
+ * GT911 capacitive touch on a Raspberry Pi 4, for the Good Display
+ * GDEY075T7-T01 panel.
+ *
+ * Nothing on I2C announces itself, so the kernel has to be told the chip is
+ * there before the mainline `goodix` driver will bind to it. That is all this
+ * overlay does.
+ *
+ *   sudo apt install device-tree-compiler
+ *   dtc -@ -I dts -O dtb -o gt911-epaper.dtbo gt911-epaper.dts
+ *   sudo cp gt911-epaper.dtbo /boot/firmware/overlays/
+ *   # then in /boot/firmware/config.txt:
+ *   #   dtparam=i2c_arm=on
+ *   #   dtoverlay=gt911-epaper
+ *   sudo reboot && evtest        # expect a Goodix device
+ *
+ * GPIO choices avoid the Waveshare e-Paper Driver HAT, which uses
+ * GPIO 8/9/10/11 (SPI0), 17 (RST), 24 (BUSY) and 25 (DC).
+ *
+ * TODO(oli): the address is 0x5D or 0x14 depending on how INT is held during
+ * the chip's reset sequence. If the driver does not bind, try 0x14.
+ */
+
+/dts-v1/;
+/plugin/;
+
+/ {
+    compatible = "brcm,bcm2711";
+
+    fragment@0 {
+        target = <&i2c1>;
+        __overlay__ {
+            #address-cells = <1>;
+            #size-cells = <0>;
+            status = "okay";
+
+            gt911: gt911@5d {
+                compatible = "goodix,gt911";
+                reg = <0x5d>;
+                interrupt-parent = <&gpio>;
+                interrupts = <4 2>;                 /* GPIO4, falling edge */
+                irq-gpios = <&gpio 4 0>;            /* active high */
+                reset-gpios = <&gpio 27 0>;
+                touchscreen-size-x = <800>;
+                touchscreen-size-y = <480>;
+                status = "okay";
+            };
+        };
+    };
+
+    fragment@1 {
+        target = <&gpio>;
+        __overlay__ {
+            gt911_pins: gt911_pins {
+                brcm,pins = <4 27>;
+                brcm,function = <0 1>;              /* IN, OUT */
+            };
+        };
+    };
+};

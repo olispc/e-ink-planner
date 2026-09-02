@@ -1,0 +1,23 @@
+# Secrets — the whole family, not just .env (see ~/.claude/standards/security.md)
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+credentials.json
+service-account*.json
+
+# Local scratch: real task snapshots, rendered previews, anything with live data
+local/
+*.png
+!docs/*.png
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# macOS
+.DS_Store
