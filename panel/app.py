@@ -21,7 +21,7 @@ from typing import List, Optional
 from .client import MindwtrClient, MindwtrError, Task
 from .config import Config
 from .display import open_display
-from .layout import ROWS, hit, render, render_detail
+from .layout import hit, render, render_detail
 from .touch import open_touch
 
 # One screenful, plus enough to keep the "N more" counter honest without
@@ -49,6 +49,9 @@ class Panel:
         # "open" — see handle_tap — so reopening a task starts stacked again.
         self.checklist_expanded: bool = False
         self.checklist_page: int = 0
+        # Which page of the list view is showing — clamped, not reset, by
+        # render() itself when the list shrinks, same as checklist_page.
+        self.list_page: int = 0
         self._last_signature: Optional[tuple] = None
         self._last_etag: Optional[str] = None
 
@@ -82,12 +85,7 @@ class Panel:
             if task is None:
                 return ("detail-missing", self.detail_task_id)
             return ("detail", task, self.checklist_expanded, self.checklist_page)
-        return (
-            "list",
-            tuple(self.tasks[:ROWS]),
-            len(self.tasks),
-            self.stale_since is not None,
-        )
+        return ("list", tuple(self.tasks), self.list_page, self.stale_since is not None)
 
     # -- output -----------------------------------------------------------
     def draw(self, force: bool = False, partial: bool = False) -> None:
@@ -111,6 +109,7 @@ class Panel:
                 self.config.view,
                 total=len(self.tasks),
                 stale_since=self.stale_since,
+                page=self.list_page,
             )
         if partial:
             self.display.show_partial(rendered.image)
@@ -143,6 +142,11 @@ class Panel:
             self.draw(force=True, partial=True)
         elif box.kind == "page":
             self.checklist_page = box.page
+            self.draw(force=True, partial=True)
+        elif box.kind == "star":
+            self._toggle_star(box.task_id)
+        elif box.kind == "list_page":
+            self.list_page = box.page
             self.draw(force=True, partial=True)
 
     def _complete_task(self, task_id: str) -> None:
@@ -182,7 +186,7 @@ class Panel:
         else:
             rendered = render(
                 self.tasks, self.config.view, total=len(self.tasks),
-                stale_since=self.stale_since, completing=task.id,
+                stale_since=self.stale_since, completing=task.id, page=self.list_page,
             )
         self.display.show_partial(rendered.image)
         self.hitboxes = rendered.hitboxes
@@ -207,6 +211,30 @@ class Panel:
             self.client.update_checklist(task_id, new_checklist)
         except MindwtrError as exc:
             print("checklist update failed: %s" % exc, file=sys.stderr)
+            self.tasks = [task if t.id == task_id else t for t in self.tasks]
+            if self.stale_since is None:
+                self.stale_since = datetime.now()
+            self.draw(force=True, partial=True)
+            return
+        self.refresh()
+        self.draw()
+
+    def _toggle_star(self, task_id: str) -> None:
+        task = self._find(task_id)
+        if task is None:
+            return
+        new_focused = not task.focused
+        self.tasks = [
+            replace(t, focused=new_focused) if t.id == task_id else t for t in self.tasks
+        ]
+        # The heavier border/filled star show up immediately; re-sorting the
+        # compound focus view into its new position waits for the refresh()
+        # below, same as a completion's row-removal reflow.
+        self.draw(force=True, partial=True)
+        try:
+            self.client.set_focused(task_id, new_focused)
+        except MindwtrError as exc:
+            print("star update failed: %s" % exc, file=sys.stderr)
             self.tasks = [task if t.id == task_id else t for t in self.tasks]
             if self.stale_since is None:
                 self.stale_since = datetime.now()

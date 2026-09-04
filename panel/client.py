@@ -116,6 +116,17 @@ class MindwtrClient:
         if not r.ok:
             raise MindwtrError("checklist update %s: HTTP %s" % (task_id, r.status_code))
 
+    def set_focused(self, task_id: str, focused: bool) -> None:
+        try:
+            r = self.session.patch(
+                "%s/v1/tasks/%s" % (self.base, task_id),
+                json={"isFocusedToday": focused}, timeout=TIMEOUT,
+            )
+        except requests.RequestException as exc:
+            raise MindwtrError("star update failed: %s" % exc) from exc
+        if not r.ok:
+            raise MindwtrError("star update %s: HTTP %s" % (task_id, r.status_code))
+
     def fetch(self, view: str, limit: int) -> List[Task]:
         """One panel's worth of tasks, with project and area names joined in.
 

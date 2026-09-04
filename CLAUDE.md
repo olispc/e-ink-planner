@@ -47,13 +47,22 @@ item, which has no next level to open). Tapping a task's title opens
 `render_detail()` — full title, meta, a description snippet, and its
 checklist if it has one, unchecked items sorted to the top. Checklist items
 get a full-width tap zone (not split) since a leaf item has only one action.
+A task row (list or detail title) adds a third, physically separate column
+at the far right — `theme.STAR_ZONE_W` — for starring: a third gesture on
+top of the existing two would need tap-vs-long-press disambiguation, exactly
+the kind of fragile distinction this app has avoided everywhere else.
 
-**Done checklist items stack, they don't just scroll off.** Eleven finished
-subtasks each taking a row is worse than one "N done — tap to show" row with
-a disclosure triangle; expanding swaps it for a "hide" row (re-stacks) plus
-the items themselves. Whatever still doesn't fit `page`'s worth of rows gets
-a "page X/Y" control on the last row instead of being silently dropped —
-wraps around rather than exposing a dead end past the last page.
+**Done checklist items stack, they don't just scroll off — same pattern
+covers a long list view.** Eleven finished subtasks each taking a row is
+worse than one "N done — tap to show" row with a disclosure triangle;
+expanding swaps it for a "hide" row (re-stacks) plus the items themselves.
+Whatever still doesn't fit `page`'s worth of rows gets a "page X/Y" control
+on the last row instead of being silently dropped — wraps around rather than
+exposing a dead end past the last page. `render()`'s list view reuses the
+identical mechanism once `total > ROWS`; the one difference is the boundary
+rule (focused vs. backlog) looks at the *global* task list across the page
+split, not just what's visible on the current page, so it still lands
+correctly when the split falls right at a page edge.
 
 **Checklist writes are whole-array, not per-item.** Mindwtr's schema (verified
 against `packages/core/src/task-sync-schema.ts`) has no per-item toggle route

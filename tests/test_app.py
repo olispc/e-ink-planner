@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -23,20 +24,29 @@ def task(n: int, **kw) -> Task:
 
 
 class StubClient:
-    """No network — just returns whatever `tasks` currently holds, so a
-    test can simulate "the server now has different data" between calls."""
+    """No network, but persists writes like a real store — a test can still
+    reassign `.tasks` directly to simulate "changed on another device", but
+    a mutation method now behaves the way the real server would, which
+    matters once a Panel method's own internal refresh() reads it back."""
 
     def __init__(self, tasks):
-        self.tasks = tasks
+        self.tasks = list(tasks)
 
     def fetch(self, view, limit):
         return list(self.tasks)
 
     def complete(self, task_id):
-        pass
+        self.tasks = [t for t in self.tasks if t.id != task_id]
 
     def update_checklist(self, task_id, checklist):
-        pass
+        self.tasks = [
+            replace(t, checklist=checklist) if t.id == task_id else t for t in self.tasks
+        ]
+
+    def set_focused(self, task_id, focused):
+        self.tasks = [
+            replace(t, focused=focused) if t.id == task_id else t for t in self.tasks
+        ]
 
     def data_etag(self):
         return ""
@@ -155,6 +165,43 @@ class TestDetailRedrawGating(unittest.TestCase):
         panel.refresh()
         panel.draw()
         self.assertEqual(panel.mode, "list")
+
+
+class TestStarToggle(unittest.TestCase):
+    def test_toggle_star_flips_focused_optimistically(self):
+        panel = make_panel([task(1, focused=False)])
+        panel.refresh()
+        panel.draw(force=True)
+
+        panel._toggle_star("task-1")
+        self.assertTrue(panel._find("task-1").focused)
+
+    def test_toggle_star_reverts_on_failure(self):
+        class FailingClient(StubClient):
+            def set_focused(self, task_id, focused):
+                from panel.client import MindwtrError
+
+                raise MindwtrError("boom")
+
+        panel = make_panel([task(1, focused=False)])
+        panel.client = FailingClient([task(1, focused=False)])
+        panel.refresh()
+        panel.draw(force=True)
+
+        panel._toggle_star("task-1")
+        self.assertFalse(panel._find("task-1").focused)
+        self.assertIsNotNone(panel.stale_since)
+
+
+class TestListPagination(unittest.TestCase):
+    def test_list_page_hitbox_advances_the_page(self):
+        panel = make_panel([task(i) for i in range(25)])
+        panel.refresh()
+        panel.draw(force=True)
+
+        pager = next(b for b in panel.hitboxes if b.kind == "list_page")
+        panel.handle_tap((400, pager.y0 + 10))
+        self.assertEqual(panel.list_page, pager.page)
 
 
 if __name__ == "__main__":

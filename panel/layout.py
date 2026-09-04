@@ -6,6 +6,7 @@ and thresholding afterwards looks worse — the glyph edges turn to mud.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Optional, Sequence, Tuple
@@ -15,8 +16,9 @@ from PIL import Image, ImageDraw
 from .client import Task
 from .theme import (
     BLACK, BOX, BOX_X, DETAIL_BOX, DETAIL_BOX_Y_OFFSET, DETAIL_ROW_H,
-    FOOTER_H, HEADER_H, HEIGHT, MARGIN, ROW_H, ROWS, TEXT_RIGHT, TEXT_X,
-    WHITE, WIDTH, fonts,
+    DETAIL_STAR_ZONE_W, FOOTER_H, HEADER_H, HEIGHT, LIST_TEXT_RIGHT, MARGIN,
+    ROW_H, ROWS, STAR_SIZE, STAR_ZONE_W, TEXT_RIGHT, TEXT_X, WHITE, WIDTH,
+    fonts,
 )
 
 VIEW_TITLES = {
@@ -45,6 +47,8 @@ class Hitbox:
     - "expand"    — un-stack the done-items summary row (detail view)
     - "collapse"  — re-stack done items back into the summary row
     - "page"      — jump to checklist page `page` (detail view, wraps around)
+    - "star"      — flip task_id's isFocusedToday (list row or detail title)
+    - "list_page" — jump to list page `page` (list view, wraps around)
     """
     kind: str
     x0: int
@@ -135,6 +139,22 @@ def _draw_disclosure(d: ImageDraw.ImageDraw, x0: int, y0: int, size: int, direct
     d.polygon(points, fill=BLACK)
 
 
+def _draw_star(d: ImageDraw.ImageDraw, cx: int, cy: int, size: int, filled: bool) -> None:
+    """Five-point star, filled when starred. Unlike the checkbox, a filled
+    star doesn't collide with "no fills mean done" — different shape,
+    different and unambiguous meaning everywhere this convention appears."""
+    r_outer, r_inner = size / 2, size / 2 * 0.42
+    points = []
+    for i in range(10):
+        angle = -math.pi / 2 + i * math.pi / 5
+        r = r_outer if i % 2 == 0 else r_inner
+        points.append((cx + r * math.cos(angle), cy + r * math.sin(angle)))
+    if filled:
+        d.polygon(points, fill=BLACK)
+    else:
+        d.polygon(points, outline=BLACK, width=2)
+
+
 def _strike_line(d: ImageDraw.ImageDraw, x: int, y: int, text: str, font, width: int = 2) -> None:
     """Strikethrough centered on the text's actual rendered bounds, not a
     fixed offset from its drawing origin — that drifts with font metrics
@@ -162,21 +182,31 @@ def render(
     now: Optional[datetime] = None,
     stale_since: Optional[datetime] = None,
     completing: Optional[str] = None,
+    page: int = 0,
 ) -> Rendered:
     now = now or datetime.now()
     f = fonts()
     img = Image.new("1", (WIDTH, HEIGHT), WHITE)
     d = ImageDraw.Draw(img)
 
-    visible = list(tasks)[:ROWS]
-    total = len(tasks) if total is None else total
+    all_tasks = list(tasks)
+    total = len(all_tasks) if total is None else total
+
+    # A page whose tasks don't fit reserves its last row for the pager, same
+    # scheme as the detail view's checklist — see render_detail().
+    needs_paging = len(all_tasks) > ROWS
+    page_capacity = max(1, ROWS - 1) if needs_paging else ROWS
+    total_pages = max(1, -(-len(all_tasks) // page_capacity)) if page_capacity else 1
+    page = max(0, min(page, total_pages - 1))
+    start = page * page_capacity
+    visible = all_tasks[start:start + page_capacity]
 
     # --- header -----------------------------------------------------------
     d.text((MARGIN, 20), VIEW_TITLES.get(view, view.upper()), font=f.header, fill=BLACK)
     right = now.strftime("%a %-d %b")
     # In the focus view the useful number is what you chose for today, not the
     # size of the backlog underneath it.
-    headline = sum(1 for t in visible if t.focused) if view == "focus" else total
+    headline = sum(1 for t in all_tasks if t.focused) if view == "focus" else total
     if headline:
         right = "%d  ·  %s" % (headline, right)
     d.text(
@@ -193,14 +223,18 @@ def render(
             ((WIDTH - _text_width(d, message, f.empty)) // 2, HEIGHT // 2 - 24),
             message, font=f.empty, fill=BLACK,
         )
+    star_x0 = WIDTH - STAR_ZONE_W
     for i, task in enumerate(visible):
         y0 = HEADER_H + i * ROW_H
         y1 = y0 + ROW_H
-        # Split per row, not per task: the checkbox column completes, the
-        # text opens detail — see the Hitbox docstring for why TEXT_X is
-        # reused as the boundary everywhere.
+        # Split per row, not per task: checkbox completes, text opens
+        # detail, the star column (far right) toggles today's focus — see
+        # the Hitbox docstring for why TEXT_X is reused as a boundary
+        # everywhere else in the app; the star gets its own column because
+        # there's no gesture left on the other two zones to overload safely.
         hitboxes.append(Hitbox("complete", 0, TEXT_X, y0, y1, task_id=task.id))
-        hitboxes.append(Hitbox("open", TEXT_X, WIDTH, y0, y1, task_id=task.id))
+        hitboxes.append(Hitbox("open", TEXT_X, star_x0, y0, y1, task_id=task.id))
+        hitboxes.append(Hitbox("star", star_x0, WIDTH, y0, y1, task_id=task.id))
 
         box_y = y0 + (ROW_H - BOX) // 2
         # Emphasis is a heavier border, never a fill: a filled checkbox reads as
@@ -210,10 +244,11 @@ def render(
             [BOX_X, box_y, BOX_X + BOX, box_y + BOX],
             outline=BLACK, width=4 if task.focused else 2,
         )
+        _draw_star(d, (star_x0 + WIDTH) // 2, y0 + ROW_H // 2, STAR_SIZE, filled=task.focused)
 
         meta = _meta_line(task)
         title_y = y0 + (12 if meta else 20)
-        title_text = _ellipsize(d, task.title, f.title, TEXT_RIGHT - TEXT_X)
+        title_text = _ellipsize(d, task.title, f.title, LIST_TEXT_RIGHT - TEXT_X)
         d.text((TEXT_X, title_y), title_text, font=f.title, fill=BLACK)
         if task.id == completing:
             # Held for one beat before the row is dropped and the list
@@ -224,25 +259,45 @@ def render(
         if meta:
             d.text(
                 (TEXT_X, title_y + 30),
-                _ellipsize(d, meta, f.meta, TEXT_RIGHT - TEXT_X),
+                _ellipsize(d, meta, f.meta, LIST_TEXT_RIGHT - TEXT_X),
                 font=f.meta, fill=BLACK,
             )
-        if i < len(visible) - 1:
+        if i < len(visible) - 1 or needs_paging:
             # A heavier full-width rule marks where today's chosen work ends
-            # and the backlog filling the remaining rows begins.
-            boundary = task.focused and not visible[i + 1].focused
+            # and the backlog filling the remaining rows begins. Looks at the
+            # global list, not just this page, so the rule still lands
+            # correctly even when the split falls right at a page boundary.
+            global_idx = start + i
+            next_task = all_tasks[global_idx + 1] if global_idx + 1 < len(all_tasks) else None
+            boundary = next_task is not None and task.focused and not next_task.focused
             d.line(
-                [(MARGIN if boundary else TEXT_X, y0 + ROW_H), (TEXT_RIGHT, y0 + ROW_H)],
+                [(MARGIN if boundary else TEXT_X, y1), (TEXT_RIGHT, y1)],
                 fill=BLACK, width=2 if boundary else 1,
             )
+
+    if needs_paging:
+        pi = len(visible)
+        y0 = HEADER_H + pi * ROW_H
+        y1 = y0 + ROW_H
+        next_page = (page + 1) % total_pages
+        hitboxes.append(Hitbox("list_page", 0, WIDTH, y0, y1, page=next_page))
+        box_y = y0 + (ROW_H - BOX) // 2
+        _draw_disclosure(d, BOX_X, box_y, BOX, direction="right")
+        d.text(
+            (TEXT_X, y0 + 20), "page %d/%d — tap for more" % (page + 1, total_pages),
+            font=f.title, fill=BLACK,
+        )
 
     # --- footer -----------------------------------------------------------
     fy = HEIGHT - FOOTER_H
     d.line([(MARGIN, fy), (TEXT_RIGHT, fy)], fill=BLACK)
     left = "updated %s" % now.strftime("%H:%M")
-    overflow = total - len(visible)
-    if overflow > 0:
-        left += "   ·   %d more" % overflow
+    # Pagination reaches everything actually fetched — "more" here means
+    # more than that: tasks the server reports but fetch()'s own limit
+    # never pulled down at all, so no amount of on-panel paging reaches them.
+    not_fetched = total - len(all_tasks)
+    if not_fetched > 0:
+        left += "   ·   %d more" % not_fetched
     d.text((MARGIN, fy + 14), left, font=f.footer, fill=BLACK)
 
     if stale_since is not None:
@@ -285,14 +340,21 @@ def render_detail(
     d.line([(MARGIN, HEADER_H - 8), (TEXT_RIGHT, HEADER_H - 8)], fill=BLACK, width=2)
     hitboxes.append(Hitbox("back", 0, WIDTH, 0, HEADER_H))
 
-    # --- title + the task's own checkbox -----------------------------------
+    # --- title + the task's own checkbox and star ---------------------------
     y = HEADER_H + 14
     box_y = y
     d.rectangle(
         [BOX_X, box_y, BOX_X + BOX, box_y + BOX],
         outline=BLACK, width=4 if task.focused else 2,
     )
-    title_lines = _wrap(d, task.title, f.title, TEXT_RIGHT - TEXT_X, max_lines=2)
+    star_cx = TEXT_RIGHT - DETAIL_STAR_ZONE_W // 2
+    _draw_star(d, star_cx, box_y + BOX // 2, STAR_SIZE, filled=task.focused)
+    hitboxes.append(
+        Hitbox("star", TEXT_RIGHT - DETAIL_STAR_ZONE_W, TEXT_RIGHT, y, y + BOX, task_id=task.id)
+    )
+    title_lines = _wrap(
+        d, task.title, f.title, TEXT_RIGHT - TEXT_X - DETAIL_STAR_ZONE_W, max_lines=2
+    )
     line_y = y
     drawn_lines = []
     for line in title_lines:

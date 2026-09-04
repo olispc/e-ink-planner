@@ -10,7 +10,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from panel.client import ChecklistItem, Task  # noqa: E402
 from panel.layout import hit, render, render_detail  # noqa: E402
-from panel.theme import HEADER_H, HEIGHT, ROW_H, ROWS, TEXT_X, WIDTH  # noqa: E402
+from panel.theme import (  # noqa: E402
+    HEADER_H, HEIGHT, ROW_H, ROWS, STAR_ZONE_W, TEXT_RIGHT, TEXT_X, WIDTH,
+)
 
 
 def task(n: int, title: str = None, checklist=None, **kw) -> Task:
@@ -36,10 +38,10 @@ class TestRender(unittest.TestCase):
         self.assertEqual(image.mode, "1")
         self.assertEqual(image.size, (WIDTH, HEIGHT))
 
-    def test_shows_at_most_one_screenful(self):
-        rendered = render([task(i) for i in range(20)], "next")
-        # Two hitboxes (checkbox + text) per visible row.
-        self.assertEqual(len(rendered.hitboxes), ROWS * 2)
+    def test_shows_at_most_one_screenful_when_it_all_fits(self):
+        rendered = render([task(i) for i in range(ROWS)], "next")
+        # Three hitboxes (checkbox / text / star) per visible row, no pager.
+        self.assertEqual(len(rendered.hitboxes), ROWS * 3)
 
     def test_empty_list_renders_without_hitboxes(self):
         rendered = render([], "next")
@@ -100,6 +102,43 @@ class TestListHitTesting(unittest.TestCase):
         for earlier, later in zip(opens, opens[1:]):
             self.assertEqual(earlier.y1, later.y0)
 
+    def test_star_column_toggles_focus(self):
+        y = HEADER_H + ROW_H // 2
+        box = hit(self.rendered.hitboxes, (WIDTH - STAR_ZONE_W // 2, y))
+        self.assertEqual((box.kind, box.task_id), ("star", "task-0"))
+
+
+class TestListPagination(unittest.TestCase):
+    def test_no_pager_when_it_all_fits(self):
+        rendered = render([task(i) for i in range(ROWS)], "next")
+        self.assertEqual([b for b in rendered.hitboxes if b.kind == "list_page"], [])
+
+    def test_pager_appears_and_reaches_every_task(self):
+        tasks = [task(i) for i in range(25)]
+        rendered = render(tasks, "next")
+        pagers = [b for b in rendered.hitboxes if b.kind == "list_page"]
+        self.assertEqual(len(pagers), 1)
+
+        seen = {b.task_id for b in rendered.hitboxes if b.kind == "open"}
+        next_page = pagers[0].page
+        guard = 0
+        while next_page != 0 and guard < 20:
+            r = render(tasks, "next", page=next_page)
+            seen |= {b.task_id for b in r.hitboxes if b.kind == "open"}
+            p = [b for b in r.hitboxes if b.kind == "list_page"]
+            next_page = p[0].page if p else 0
+            guard += 1
+        self.assertEqual(seen, {"task-%d" % i for i in range(25)})
+
+    def test_boundary_rule_survives_a_page_split(self):
+        # The focused/backlog split falls right between page 0's last row
+        # and page 1's first — render() must look at the global list to
+        # find it, not just the tasks visible on the current page.
+        tasks = [task(i, focused=True) for i in range(5)] + [task(i) for i in range(5, 10)]
+        plain = render(tasks, "focus").image
+        no_boundary = render([task(i, focused=True) for i in range(10)], "focus").image
+        self.assertNotEqual(plain.tobytes(), no_boundary.tobytes())
+
 
 class TestDetailRendering(unittest.TestCase):
     def test_is_one_bit_at_panel_size(self):
@@ -137,6 +176,11 @@ class TestDetailRendering(unittest.TestCase):
         rendered = render_detail(task(1))
         box = hit(rendered.hitboxes, (10, HEADER_H + 20))
         self.assertEqual((box.kind, box.task_id), ("complete", "task-1"))
+
+    def test_title_star_toggles_focus(self):
+        rendered = render_detail(task(1))
+        box = hit(rendered.hitboxes, (TEXT_RIGHT - 10, HEADER_H + 20))
+        self.assertEqual((box.kind, box.task_id), ("star", "task-1"))
 
     def test_checklist_item_toggle_is_full_width(self):
         # A leaf item has one action, so unlike a task row its whole width

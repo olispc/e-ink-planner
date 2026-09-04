@@ -37,6 +37,20 @@ DETAIL_ROW_H = 46
 DETAIL_BOX = 24
 DETAIL_BOX_Y_OFFSET = (DETAIL_ROW_H - DETAIL_BOX) // 2
 
+# A star to toggle isFocusedToday from the panel itself, not just the phone.
+# Reserved as its own column at the right edge — a third tap zone per row,
+# distinct from complete (left) and open (middle) — rather than overloading
+# either with a gesture (tap-vs-long-press is exactly the kind of fragile
+# distinction this app has avoided so far).
+STAR_SIZE = 26
+STAR_ZONE_W = 60
+LIST_TEXT_RIGHT = TEXT_RIGHT - STAR_ZONE_W  # title/meta ellipsis width in render()
+
+# Detail view reserves the same kind of column in its title block instead —
+# the title can wrap to 2 lines, so this trims _wrap()'s width rather than
+# competing for a fixed corner.
+DETAIL_STAR_ZONE_W = 56
+
 BLACK, WHITE = 0, 1           # mode "1" pixel values
 
 # Candidates in preference order: DejaVu ships with Raspberry Pi OS
