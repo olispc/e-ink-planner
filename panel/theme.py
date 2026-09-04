@@ -24,6 +24,19 @@ BOX_X = MARGIN + 4
 TEXT_X = BOX_X + BOX + 22
 TEXT_RIGHT = WIDTH - MARGIN
 
+# TEXT_X is the tap-zone boundary everywhere in the app, not just list-row
+# geometry: x < TEXT_X always means "the checkbox column" (complete a task,
+# toggle a checklist item, or — in the header — go back), x >= TEXT_X always
+# means "the text" (open a task's detail, or nothing further for a leaf
+# checklist item). One boundary, reused, keeps the tap model legible.
+
+# Checklist rows in the detail view get their own, smaller geometry: no
+# meta sub-line under each item, so more of them fit per screen than a task
+# row needs.
+DETAIL_ROW_H = 46
+DETAIL_BOX = 24
+DETAIL_BOX_Y_OFFSET = (DETAIL_ROW_H - DETAIL_BOX) // 2
+
 BLACK, WHITE = 0, 1           # mode "1" pixel values
 
 # Candidates in preference order: DejaVu ships with Raspberry Pi OS

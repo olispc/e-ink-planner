@@ -7,15 +7,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from panel.client import MindwtrClient  # noqa: E402
+from panel.client import ChecklistItem, MindwtrClient  # noqa: E402
 
 
 class FakeClient(MindwtrClient):
     """Substitutes the transport, keeps the joining and view logic under test."""
 
-    def __init__(self, tasks):
+    def __init__(self, tasks, etag=""):
         self.base = "http://stub"
         self._tasks = tasks
+        self._etag = etag
 
     def _get(self, path, params=None):
         if path == "/v1/projects":
@@ -27,6 +28,11 @@ class FakeClient(MindwtrClient):
             return {"tasks": [t for t in self._tasks if t.get("isFocusedToday")]}
         status = params.get("status")
         return {"tasks": [t for t in self._tasks if t.get("status") == status]}
+
+    def _head(self, path):
+        if path == "/v1/data":
+            return {"ETag": self._etag} if self._etag else {}
+        return {}
 
 
 def raw(tid, **kw):
@@ -66,6 +72,31 @@ class TestJoins(unittest.TestCase):
         task = client.fetch("next", 50)[0]
         self.assertEqual(task.project, "sowr")
         self.assertEqual(task.area, "Digital")
+
+    def test_description_and_checklist_pass_through(self):
+        client = FakeClient([raw(
+            "a", description="notes",
+            checklist=[{"id": "c1", "title": "step one", "isCompleted": True}],
+        )])
+        task = client.fetch("next", 50)[0]
+        self.assertEqual(task.description, "notes")
+        self.assertEqual(task.checklist, [ChecklistItem(id="c1", title="step one", completed=True)])
+
+    def test_missing_description_and_checklist_default_safely(self):
+        client = FakeClient([raw("a")])
+        task = client.fetch("next", 50)[0]
+        self.assertIsNone(task.description)
+        self.assertEqual(task.checklist, [])
+
+
+class TestDataEtag(unittest.TestCase):
+    def test_etag_reflects_the_store_file(self):
+        client = FakeClient([], etag='W/"abc"')
+        self.assertEqual(client.data_etag(), 'W/"abc"')
+
+    def test_no_store_yet_is_a_stable_empty_value(self):
+        client = FakeClient([])
+        self.assertEqual(client.data_etag(), "")
 
 
 if __name__ == "__main__":

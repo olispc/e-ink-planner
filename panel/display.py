@@ -18,6 +18,12 @@ class Display:
     def show(self, image: Image.Image) -> None:
         raise NotImplementedError
 
+    def show_partial(self, image: Image.Image) -> None:
+        """A faster, flicker-free update for tap-driven changes. Backends
+        that have no such mode (or shouldn't bother — png has no ghosting to
+        avoid) just fall back to a full show()."""
+        self.show(image)
+
     def close(self) -> None:
         pass
 
@@ -38,7 +44,17 @@ class EPaperDisplay(Display):
     Same controller and resolution as Waveshare's own 7.5in V2, so their
     epd7in5_V2 module drives it. Vendored on the Pi from
     github.com/waveshareteam/e-Paper — it is not on PyPI.
+
+    That driver also exposes init_part()/display_Partial(): confirmed against
+    the vendored source and its own demo (epd_7in5_V2_test.py), which runs
+    ten consecutive partial updates with no full refresh between them. Partial
+    mode is flicker-free and much faster than the ~1.5s full refresh, but
+    repeated partial updates build up visible ghosting on this panel — hence
+    FULL_REFRESH_EVERY below, matching the vendor's own bounded-burst usage
+    rather than relying on partial mode indefinitely.
     """
+
+    FULL_REFRESH_EVERY = 15
 
     def __init__(self) -> None:
         from waveshare_epd import epd7in5_V2  # noqa: WPS433 — Pi-only import
@@ -46,11 +62,27 @@ class EPaperDisplay(Display):
         self.epd = epd7in5_V2.EPD()
         self.epd.init()
         self.epd.Clear()
+        self._in_partial_mode = False
+        self._partials_since_full = 0
 
     def show(self, image: Image.Image) -> None:
         # getbuffer wants a PIL image the size of the panel; mode "1" is what
         # it packs from, so no conversion needed.
+        if self._in_partial_mode:
+            self.epd.init()
+            self._in_partial_mode = False
         self.epd.display(self.epd.getbuffer(image))
+        self._partials_since_full = 0
+
+    def show_partial(self, image: Image.Image) -> None:
+        if self._partials_since_full >= self.FULL_REFRESH_EVERY:
+            self.show(image)
+            return
+        if not self._in_partial_mode:
+            self.epd.init_part()
+            self._in_partial_mode = True
+        self.epd.display_Partial(self.epd.getbuffer(image), 0, 0, self.epd.width, self.epd.height)
+        self._partials_since_full += 1
 
     def close(self) -> None:
         # Leaving the panel powered does nothing useful — the image persists

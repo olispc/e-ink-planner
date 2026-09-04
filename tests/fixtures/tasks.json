@@ -8,7 +8,17 @@
       "contexts": [
         "@computer"
       ],
-      "focused": true
+      "focused": true,
+      "description": "Install the operating system on the drive, boot without a memory card, then set up the container tools and remote access.",
+      "checklist": [
+        {"id": "c1", "title": "Install the operating system on the drive", "completed": true},
+        {"id": "c2", "title": "Boot headless and connect remotely", "completed": true},
+        {"id": "c3", "title": "Install the container tools", "completed": true},
+        {"id": "c4", "title": "Start the sync service and point the laptop at it", "completed": false},
+        {"id": "c5", "title": "Set up nightly backups to cloud storage", "completed": false},
+        {"id": "c6", "title": "Test a full restore, not just a backup", "completed": false},
+        {"id": "c7", "title": "Wire up the touchscreen", "completed": false}
+      ]
     },
     {
       "id": "22222222-2222-4222-8222-222222222222",

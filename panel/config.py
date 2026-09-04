@@ -31,6 +31,7 @@ class Config:
     token: str
     view: str
     poll_seconds: int
+    check_seconds: int
     display: str
     touch: str
     png_path: Path
@@ -45,6 +46,7 @@ class Config:
             token=os.environ.get("MINDWTR_TOKEN", ""),
             view=os.environ.get("PANEL_VIEW", "focus"),
             poll_seconds=int(os.environ.get("PANEL_POLL_SECONDS", "300")),
+            check_seconds=int(os.environ.get("PANEL_CHECK_SECONDS", "5")),
             display=os.environ.get("PANEL_DISPLAY", "png"),
             touch=os.environ.get("PANEL_TOUCH", "none"),
             png_path=Path(png) if Path(png).is_absolute() else REPO_ROOT / png,
