@@ -65,6 +65,24 @@ difference is the boundary rule (focused vs. backlog) looks at the *global*
 task list across the page split, not just what's visible on the current
 page, so it still lands correctly when the split falls right at a page edge.
 
+**The header holds real controls, not just a title.** Tapping the view title
+is "home" (list page back to 0 — the toggles below are deliberately left
+alone, since a stray tap on the title shouldn't undo a view you set up on
+purpose). Sort (newest/oldest by `created_at`) and area/project grouping live
+in a fixed-position cluster at header-center, anchored there rather than
+relative to the (variable-width) title or date text so neither can ever
+collide with it. Sort is a real tri-state — `None` (default fetch order,
+heavy rule intact) / `True` / `False` — reached with two arrow buttons, not
+three: tapping the *already-active* arrow clears back to `None`, since
+"home" won't do it and a control with no way back to default is a dead end.
+`_organize_tasks()` (layout.py) turns the flat fetched list into a stream of
+task/header entries per these toggles; `_paginate()` bin-packs that stream by
+real height (a group header is half a task row) rather than a fixed row
+count, so paging still works when rows aren't all the same size. Grouping
+sets `allow_boundary = False` — the focused/backlog heavy rule is a property
+of the *default* order and doesn't have a coherent meaning once sort or
+grouping has overridden it.
+
 **Checklist writes are whole-array, not per-item.** Mindwtr's schema (verified
 against `packages/core/src/task-sync-schema.ts`) has no per-item toggle route
 — `PATCH /v1/tasks/:id` with `checklist` replaces the entire array. Toggling

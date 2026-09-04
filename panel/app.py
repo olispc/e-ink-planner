@@ -52,6 +52,14 @@ class Panel:
         # Which page of the list view is showing — clamped, not reset, by
         # render() itself when the list shrinks, same as checklist_page.
         self.list_page: int = 0
+        # None = default fetch order (focused-first, heavy rule intact);
+        # True/False = sorted by created date, newest/oldest first. Tapping
+        # the already-active sort arrow clears back to None — the only way
+        # back to the default order, since "home" deliberately leaves these
+        # toggles alone (see handle_tap's "home" case).
+        self.sort_mode: Optional[bool] = None
+        self.group_by_area: bool = False
+        self.group_by_project: bool = False
         self._last_signature: Optional[tuple] = None
         self._last_etag: Optional[str] = None
 
@@ -85,7 +93,11 @@ class Panel:
             if task is None:
                 return ("detail-missing", self.detail_task_id)
             return ("detail", task, self.checklist_expanded, self.checklist_page)
-        return ("list", tuple(self.tasks), self.list_page, self.stale_since is not None)
+        return (
+            "list", tuple(self.tasks), self.list_page,
+            self.sort_mode, self.group_by_area, self.group_by_project,
+            self.stale_since is not None,
+        )
 
     # -- output -----------------------------------------------------------
     def draw(self, force: bool = False, partial: bool = False) -> None:
@@ -110,6 +122,9 @@ class Panel:
                 total=len(self.tasks),
                 stale_since=self.stale_since,
                 page=self.list_page,
+                sort_mode=self.sort_mode,
+                group_by_area=self.group_by_area,
+                group_by_project=self.group_by_project,
             )
         if partial:
             self.display.show_partial(rendered.image)
@@ -147,6 +162,25 @@ class Panel:
             self._toggle_star(box.task_id)
         elif box.kind == "list_page":
             self.list_page = box.page
+            self.draw(force=True, partial=True)
+        elif box.kind == "home":
+            self.list_page = 0
+            self.draw(force=True, partial=True)
+        elif box.kind == "sort_newest":
+            self.sort_mode = None if self.sort_mode is True else True
+            self.list_page = 0
+            self.draw(force=True, partial=True)
+        elif box.kind == "sort_oldest":
+            self.sort_mode = None if self.sort_mode is False else False
+            self.list_page = 0
+            self.draw(force=True, partial=True)
+        elif box.kind == "toggle_project_view":
+            self.group_by_project = not self.group_by_project
+            self.list_page = 0
+            self.draw(force=True, partial=True)
+        elif box.kind == "toggle_area_view":
+            self.group_by_area = not self.group_by_area
+            self.list_page = 0
             self.draw(force=True, partial=True)
 
     def _complete_task(self, task_id: str) -> None:
@@ -187,6 +221,8 @@ class Panel:
             rendered = render(
                 self.tasks, self.config.view, total=len(self.tasks),
                 stale_since=self.stale_since, completing=task.id, page=self.list_page,
+                sort_mode=self.sort_mode, group_by_area=self.group_by_area,
+                group_by_project=self.group_by_project,
             )
         self.display.show_partial(rendered.image)
         self.hitboxes = rendered.hitboxes

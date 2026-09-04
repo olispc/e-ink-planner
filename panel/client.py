@@ -26,11 +26,35 @@ per-item toggle route. Ticking one item means read-modify-write the array.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import requests
 
 TIMEOUT = 10
+
+
+def _parse_iso(value: Optional[str]) -> Optional[datetime]:
+    """Mindwtr's timestamps have a variable-length fractional-seconds field
+    (observed 5 digits, e.g. "...06.23589Z") — Python's fromisoformat only
+    accepts exactly 3 or 6 digits before 3.11, so pad/truncate rather than
+    let sorting silently drop tasks whose timestamp has an unusual count."""
+    if not value:
+        return None
+    v = value.replace("Z", "+00:00")
+    if "." in v:
+        head, rest = v.split(".", 1)
+        for sign in ("+", "-"):
+            if sign in rest:
+                frac, tz = rest.split(sign, 1)
+                v = "%s.%s%s%s" % (head, (frac + "000000")[:6], sign, tz)
+                break
+        else:
+            v = "%s.%s" % (head, (rest + "000000")[:6])
+    try:
+        return datetime.fromisoformat(v)
+    except ValueError:
+        return None
 
 
 @dataclass(frozen=True)
@@ -48,6 +72,7 @@ class Task:
     area: Optional[str]
     contexts: List[str]
     focused: bool
+    created_at: Optional[datetime]
     description: Optional[str]
     checklist: List[ChecklistItem]
 
@@ -166,6 +191,7 @@ class MindwtrClient:
                     area=area,
                     contexts=list(t.get("contexts") or []),
                     focused=bool(t.get("isFocusedToday")),
+                    created_at=_parse_iso(t.get("createdAt")),
                     description=t.get("description") or None,
                     checklist=[
                         ChecklistItem(

@@ -17,7 +17,7 @@ from panel.config import Config  # noqa: E402
 def task(n: int, **kw) -> Task:
     defaults = dict(
         id="task-%d" % n, title="Task %d" % n, project=None, area=None,
-        contexts=[], focused=False, description=None, checklist=[],
+        contexts=[], focused=False, created_at=None, description=None, checklist=[],
     )
     defaults.update(kw)
     return Task(**defaults)
@@ -213,6 +213,87 @@ class TestListPagination(unittest.TestCase):
         backward = min(pagers, key=lambda b: b.x0)  # left half of the row
         panel.handle_tap((backward.x0 + 10, backward.y0 + 10))
         self.assertEqual(panel.list_page, backward.page)
+
+
+class TestHeaderControls(unittest.TestCase):
+    def _tap(self, panel, kind):
+        box = next(b for b in panel.hitboxes if b.kind == kind)
+        panel.handle_tap((box.x0 + 5, box.y0 + 5))
+
+    def test_sort_newest_sets_mode_then_clears_on_second_tap(self):
+        panel = make_panel([task(1)])
+        panel.refresh()
+        panel.draw(force=True)
+
+        self._tap(panel, "sort_newest")
+        self.assertIs(panel.sort_mode, True)
+        self._tap(panel, "sort_newest")
+        self.assertIsNone(panel.sort_mode)
+
+    def test_sort_oldest_sets_mode_then_clears_on_second_tap(self):
+        panel = make_panel([task(1)])
+        panel.refresh()
+        panel.draw(force=True)
+
+        self._tap(panel, "sort_oldest")
+        self.assertIs(panel.sort_mode, False)
+        self._tap(panel, "sort_oldest")
+        self.assertIsNone(panel.sort_mode)
+
+    def test_switching_sort_direction_replaces_rather_than_toggles_off(self):
+        panel = make_panel([task(1)])
+        panel.refresh()
+        panel.draw(force=True)
+
+        self._tap(panel, "sort_newest")
+        self.assertIs(panel.sort_mode, True)
+        self._tap(panel, "sort_oldest")
+        self.assertIs(panel.sort_mode, False)
+
+    def test_project_and_area_view_toggle_independently_and_combine(self):
+        panel = make_panel([task(1)])
+        panel.refresh()
+        panel.draw(force=True)
+
+        self._tap(panel, "toggle_project_view")
+        self.assertTrue(panel.group_by_project)
+        self.assertFalse(panel.group_by_area)
+
+        self._tap(panel, "toggle_area_view")
+        self.assertTrue(panel.group_by_project)
+        self.assertTrue(panel.group_by_area)
+
+        self._tap(panel, "toggle_project_view")
+        self.assertFalse(panel.group_by_project)
+        self.assertTrue(panel.group_by_area)
+
+    def test_toggling_a_view_control_resets_the_page(self):
+        panel = make_panel([task(i) for i in range(25)])
+        panel.refresh()
+        panel.draw(force=True)
+        pagers = [b for b in panel.hitboxes if b.kind == "list_page"]
+        forward = max(pagers, key=lambda b: b.x0)
+        panel.handle_tap((forward.x0 + 10, forward.y0 + 10))
+        self.assertNotEqual(panel.list_page, 0)
+
+        self._tap(panel, "toggle_project_view")
+        self.assertEqual(panel.list_page, 0)
+
+    def test_home_resets_page_but_leaves_sort_and_grouping_alone(self):
+        panel = make_panel([task(i) for i in range(25)])
+        panel.refresh()
+        panel.draw(force=True)
+        self._tap(panel, "sort_newest")
+        self._tap(panel, "toggle_area_view")
+        pagers = [b for b in panel.hitboxes if b.kind == "list_page"]
+        forward = max(pagers, key=lambda b: b.x0)
+        panel.handle_tap((forward.x0 + 10, forward.y0 + 10))
+        self.assertNotEqual(panel.list_page, 0)
+
+        self._tap(panel, "home")
+        self.assertEqual(panel.list_page, 0)
+        self.assertIs(panel.sort_mode, True)
+        self.assertTrue(panel.group_by_area)
 
 
 if __name__ == "__main__":

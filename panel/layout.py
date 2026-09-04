@@ -16,9 +16,10 @@ from PIL import Image, ImageDraw
 from .client import Task
 from .theme import (
     BLACK, BOX, BOX_X, DETAIL_BOX, DETAIL_BOX_Y_OFFSET, DETAIL_ROW_H,
-    DETAIL_STAR_ZONE_W, FOOTER_H, HEADER_H, HEIGHT, LIST_TEXT_RIGHT, MARGIN,
-    ROW_H, ROWS, STAR_SIZE, STAR_ZONE_W, TEXT_RIGHT, TEXT_X, WHITE, WIDTH,
-    fonts,
+    DETAIL_STAR_ZONE_W, FOOTER_H, GROUP_HEADER_H, GROUP_TOGGLE_BOX,
+    HEADER_H, HEIGHT, LIST_TEXT_RIGHT, MARGIN, ROW_H, ROWS,
+    SORT_ARROW_ACTIVE, SORT_ARROW_INACTIVE, STAR_SIZE, STAR_ZONE_W,
+    TEXT_RIGHT, TEXT_X, WHITE, WIDTH, fonts,
 )
 
 VIEW_TITLES = {
@@ -161,6 +162,31 @@ def _draw_star(d: ImageDraw.ImageDraw, cx: int, cy: int, size: int, filled: bool
         d.polygon(points, outline=BLACK, width=2)
 
 
+def _draw_arrow(d: ImageDraw.ImageDraw, cx: int, cy: int, size: int, up: bool, active: bool) -> None:
+    """Sort-direction arrow: the active direction draws bigger and filled,
+    the inactive one small and outlined — the size difference is the
+    affordance, no extra label needed to tell them apart."""
+    half = size / 2
+    if up:
+        points = [(cx, cy - half), (cx - half, cy + half), (cx + half, cy + half)]
+    else:
+        points = [(cx, cy + half), (cx - half, cy - half), (cx + half, cy - half)]
+    if active:
+        d.polygon(points, fill=BLACK)
+    else:
+        d.polygon(points, outline=BLACK, width=2)
+
+
+def _draw_toggle_box(d: ImageDraw.ImageDraw, x0: int, y0: int, size: int, label: str, on: bool) -> None:
+    """Small lettered box for a view toggle (project/area grouping) — same
+    heavier-border-means-on language as a focused task's checkbox, so a new
+    control doesn't need a new visual vocabulary."""
+    d.rectangle([x0, y0, x0 + size, y0 + size], outline=BLACK, width=3 if on else 1)
+    f = fonts()
+    w = _text_width(d, label, f.footer)
+    d.text((x0 + (size - w) / 2, y0 + size / 2 - 8), label, font=f.footer, fill=BLACK)
+
+
 def _strike_line(d: ImageDraw.ImageDraw, x: int, y: int, text: str, font, width: int = 2) -> None:
     """Strikethrough centered on the text's actual rendered bounds, not a
     fixed offset from its drawing origin — that drifts with font metrics
@@ -170,15 +196,103 @@ def _strike_line(d: ImageDraw.ImageDraw, x: int, y: int, text: str, font, width:
     d.line([(bbox[0], mid_y), (bbox[2], mid_y)], fill=BLACK, width=width)
 
 
-def _meta_line(task: Task) -> str:
-    """Project / area first, then contexts. Skipped entirely when empty."""
+def _meta_line(task: Task, hide_project: bool = False, hide_area: bool = False) -> str:
+    """Project / area first, then contexts. Skipped entirely when empty.
+
+    hide_project/hide_area let a grouped list view drop whichever of these
+    the group header already says — repeating "E-ink Planner" as both a
+    project header and every row's own meta line underneath it is noise,
+    not information. Hiding project still falls through to area if the
+    task has one and it isn't itself hidden — that's a real, different
+    fact the header row hasn't already stated.
+    """
     bits = []
-    if task.project:
+    if task.project and not hide_project:
         bits.append(task.project)
-    elif task.area:
+    elif task.area and not hide_area:
         bits.append(task.area)
     bits.extend(task.contexts)
     return "  ·  ".join(bits)
+
+
+def _organize_tasks(
+    tasks: Sequence[Task],
+    sort_mode: Optional[bool],
+    group_by_area: bool,
+    group_by_project: bool,
+) -> Tuple[List[tuple], bool]:
+    """Turns the fetched, already-ordered task list into a stream of
+    ("task", Task) and ("header", label, level) entries, per the current
+    sort/group toggles. Returns (entries, allow_boundary) — allow_boundary
+    is True only when neither toggle is active, since the focused/backlog
+    heavy rule is a property of the default fetch order and doesn't have a
+    coherent meaning once that order has been overridden.
+
+    sort_mode: None = fetch order as-is (focused-first); True = newest
+    created first; False = oldest first. Grouping buckets by area and/or
+    project (dict insertion order, so each bucket's own task order is
+    whatever sort_mode already produced) — area outer, project nested
+    inside when both are on, matching how the header toggles are meant to
+    combine.
+    """
+    ordered = list(tasks)
+    if sort_mode is not None:
+        ordered.sort(key=lambda t: t.created_at or datetime.min, reverse=sort_mode)
+
+    if not group_by_area and not group_by_project:
+        return [("task", t) for t in ordered], sort_mode is None
+
+    def bucket(items: Sequence[Task], key_fn, fallback: str) -> "dict[str, list]":
+        buckets: "dict[str, list]" = {}
+        for t in items:
+            key = key_fn(t) or fallback
+            buckets.setdefault(key, []).append(t)
+        return buckets
+
+    entries: List[tuple] = []
+    if group_by_area:
+        for area_name, area_tasks in bucket(ordered, lambda t: t.area, "No area").items():
+            entries.append(("header", area_name, 0))
+            if group_by_project:
+                projects = bucket(area_tasks, lambda t: t.project, "No project")
+                for proj_name, proj_tasks in projects.items():
+                    entries.append(("header", proj_name, 1))
+                    entries.extend(("task", t) for t in proj_tasks)
+            else:
+                entries.extend(("task", t) for t in area_tasks)
+    else:  # project grouping only
+        for proj_name, proj_tasks in bucket(ordered, lambda t: t.project, "No project").items():
+            entries.append(("header", proj_name, 0))
+            entries.extend(("task", t) for t in proj_tasks)
+    return entries, False
+
+
+def _entry_height(entry: tuple) -> int:
+    return ROW_H if entry[0] == "task" else GROUP_HEADER_H
+
+
+def _paginate(entries: List[tuple], available_h: int, pager_h: int) -> Tuple[List[List[tuple]], bool]:
+    """Greedy bin-pack by actual height, not a fixed row count — a page mixes
+    task rows and half-height group dividers. Every page reserves `pager_h`
+    uniformly once paging is needed at all, matching how the fixed-row
+    version reserved one row on every page rather than only where needed."""
+    total_h = sum(_entry_height(e) for e in entries)
+    if total_h <= available_h:
+        return [entries], False
+    capacity = available_h - pager_h
+    pages: List[List[tuple]] = []
+    current: List[tuple] = []
+    current_h = 0
+    for entry in entries:
+        h = _entry_height(entry)
+        if current and current_h + h > capacity:
+            pages.append(current)
+            current, current_h = [], 0
+        current.append(entry)
+        current_h += h
+    if current:
+        pages.append(current)
+    return pages or [[]], True
 
 
 def render(
@@ -189,6 +303,9 @@ def render(
     stale_since: Optional[datetime] = None,
     completing: Optional[str] = None,
     page: int = 0,
+    sort_mode: Optional[bool] = None,
+    group_by_area: bool = False,
+    group_by_project: bool = False,
 ) -> Rendered:
     now = now or datetime.now()
     f = fonts()
@@ -198,17 +315,22 @@ def render(
     all_tasks = list(tasks)
     total = len(all_tasks) if total is None else total
 
-    # A page whose tasks don't fit reserves its last row for the pager, same
-    # scheme as the detail view's checklist — see render_detail().
-    needs_paging = len(all_tasks) > ROWS
-    page_capacity = max(1, ROWS - 1) if needs_paging else ROWS
-    total_pages = max(1, -(-len(all_tasks) // page_capacity)) if page_capacity else 1
+    entries, allow_boundary = _organize_tasks(all_tasks, sort_mode, group_by_area, group_by_project)
+    available_h = HEIGHT - HEADER_H - FOOTER_H
+    pages, needs_paging = _paginate(entries, available_h, ROW_H)
+    total_pages = len(pages)
     page = max(0, min(page, total_pages - 1))
-    start = page * page_capacity
-    visible = all_tasks[start:start + page_capacity]
+    visible = pages[page]
 
-    # --- header -----------------------------------------------------------
-    d.text((MARGIN, 20), VIEW_TITLES.get(view, view.upper()), font=f.header, fill=BLACK)
+    # --- header -------------------------------------------------------------
+    title_text = VIEW_TITLES.get(view, view.upper())
+    d.text((MARGIN, 20), title_text, font=f.header, fill=BLACK)
+    # Tapping the title is "home": back to page 1. Sort/group toggles are
+    # deliberately untouched by it — see the header controls below, which
+    # are the only way to change them, so a stray tap here can't reset a
+    # view you set up on purpose.
+    hitboxes: List[Hitbox] = [Hitbox("home", 0, MARGIN + _text_width(d, title_text, f.header) + 16, 0, HEADER_H)]
+
     right = now.strftime("%a %-d %b")
     # In the focus view the useful number is what you chose for today, not the
     # size of the backlog underneath it.
@@ -219,10 +341,41 @@ def render(
         (TEXT_RIGHT - _text_width(d, right, f.header_right), 21),
         right, font=f.header_right, fill=BLACK,
     )
+
+    # --- header controls: sort direction, area/project grouping ------------
+    # Anchored to a fixed mid-header position rather than relative to the
+    # (variable-width) title or date text, so neither can ever collide with
+    # this cluster regardless of which view's title is showing.
+    cluster_cx = WIDTH // 2
+    arrow_y = 30
+    up_cx, down_cx = cluster_cx - 90, cluster_cx - 50
+    newest_active = sort_mode is True
+    oldest_active = sort_mode is False
+    _draw_arrow(
+        d, up_cx, arrow_y, SORT_ARROW_ACTIVE if newest_active else SORT_ARROW_INACTIVE,
+        up=True, active=newest_active,
+    )
+    _draw_arrow(
+        d, down_cx, arrow_y, SORT_ARROW_ACTIVE if oldest_active else SORT_ARROW_INACTIVE,
+        up=False, active=oldest_active,
+    )
+    hitboxes.append(Hitbox("sort_newest", up_cx - 18, up_cx + 18, 0, HEADER_H))
+    hitboxes.append(Hitbox("sort_oldest", down_cx - 18, down_cx + 18, 0, HEADER_H))
+
+    proj_x, area_x = cluster_cx - 10, cluster_cx + 30
+    box_y = arrow_y - GROUP_TOGGLE_BOX // 2
+    _draw_toggle_box(d, proj_x, box_y, GROUP_TOGGLE_BOX, "P", group_by_project)
+    _draw_toggle_box(d, area_x, box_y, GROUP_TOGGLE_BOX, "A", group_by_area)
+    hitboxes.append(
+        Hitbox("toggle_project_view", proj_x - 4, proj_x + GROUP_TOGGLE_BOX + 4, 0, HEADER_H)
+    )
+    hitboxes.append(
+        Hitbox("toggle_area_view", area_x - 4, area_x + GROUP_TOGGLE_BOX + 4, 0, HEADER_H)
+    )
+
     d.line([(MARGIN, HEADER_H - 8), (TEXT_RIGHT, HEADER_H - 8)], fill=BLACK, width=2)
 
-    # --- rows -------------------------------------------------------------
-    hitboxes: List[Hitbox] = []
+    # --- rows -----------------------------------------------------------
     if not visible:
         message = EMPTY_MESSAGES.get(view, "Nothing here.")
         d.text(
@@ -230,9 +383,25 @@ def render(
             message, font=f.empty, fill=BLACK,
         )
     star_x0 = WIDTH - STAR_ZONE_W
-    for i, task in enumerate(visible):
-        y0 = HEADER_H + i * ROW_H
-        y1 = y0 + ROW_H
+    y = HEADER_H
+    # Global offset of `visible`'s first entry within the full `entries`
+    # list — needed so the boundary rule below can look one entry past the
+    # end of THIS page, into the next one, rather than only within what's
+    # currently on screen (see test_boundary_rule_survives_a_page_split).
+    page_start = sum(len(p) for p in pages[:page])
+    for i, entry in enumerate(visible):
+        kind = entry[0]
+        if kind == "header":
+            _, label, level = entry
+            h = GROUP_HEADER_H
+            x = MARGIN if level == 0 else TEXT_X
+            d.text((x, y + 6), label, font=f.meta, fill=BLACK)
+            d.line([(MARGIN, y + h), (TEXT_RIGHT, y + h)], fill=BLACK, width=1)
+            y += h
+            continue
+
+        task = entry[1]
+        y0, y1 = y, y + ROW_H
         # Split per row, not per task: checkbox completes, text opens
         # detail, the star column (far right) toggles today's focus — see
         # the Hitbox docstring for why TEXT_X is reused as a boundary
@@ -252,16 +421,16 @@ def render(
         )
         _draw_star(d, (star_x0 + WIDTH) // 2, y0 + ROW_H // 2, STAR_SIZE, filled=task.focused)
 
-        meta = _meta_line(task)
+        meta = _meta_line(task, hide_project=group_by_project, hide_area=group_by_area)
         title_y = y0 + (12 if meta else 20)
-        title_text = _ellipsize(d, task.title, f.title, LIST_TEXT_RIGHT - TEXT_X)
-        d.text((TEXT_X, title_y), title_text, font=f.title, fill=BLACK)
+        title_text_row = _ellipsize(d, task.title, f.title, LIST_TEXT_RIGHT - TEXT_X)
+        d.text((TEXT_X, title_y), title_text_row, font=f.title, fill=BLACK)
         if task.id == completing:
             # Held for one beat before the row is dropped and the list
             # reflows — two static frames, not motion, so a tap visibly
             # registers before its row disappears from under the finger.
             _draw_check(d, BOX_X, box_y, BOX)
-            _strike_line(d, TEXT_X, title_y, title_text, f.title, width=3)
+            _strike_line(d, TEXT_X, title_y, title_text_row, f.title, width=3)
         if meta:
             d.text(
                 (TEXT_X, title_y + 30),
@@ -270,21 +439,23 @@ def render(
             )
         if i < len(visible) - 1 or needs_paging:
             # A heavier full-width rule marks where today's chosen work ends
-            # and the backlog filling the remaining rows begins. Looks at the
-            # global list, not just this page, so the rule still lands
-            # correctly even when the split falls right at a page boundary.
-            global_idx = start + i
-            next_task = all_tasks[global_idx + 1] if global_idx + 1 < len(all_tasks) else None
-            boundary = next_task is not None and task.focused and not next_task.focused
+            # and the backlog filling the remaining rows begins — only
+            # meaningful in the default fetch order (see _organize_tasks).
+            global_idx = page_start + i
+            next_entry = entries[global_idx + 1] if global_idx + 1 < len(entries) else None
+            next_task = next_entry[1] if next_entry and next_entry[0] == "task" else None
+            boundary = (
+                allow_boundary and next_task is not None
+                and task.focused and not next_task.focused
+            )
             d.line(
                 [(MARGIN if boundary else TEXT_X, y1), (TEXT_RIGHT, y1)],
                 fill=BLACK, width=2 if boundary else 1,
             )
+        y += ROW_H
 
     if needs_paging:
-        pi = len(visible)
-        y0 = HEADER_H + pi * ROW_H
-        y1 = y0 + ROW_H
+        y0, y1 = y, y + ROW_H
         mid = WIDTH // 2
         prev_page = (page - 1) % total_pages
         next_page = (page + 1) % total_pages

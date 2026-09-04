@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from panel.client import ChecklistItem, Task  # noqa: E402
-from panel.layout import hit, render, render_detail  # noqa: E402
+from panel.layout import _organize_tasks, hit, render, render_detail  # noqa: E402
 from panel.theme import (  # noqa: E402
     HEADER_H, HEIGHT, ROW_H, ROWS, STAR_ZONE_W, TEXT_RIGHT, TEXT_X, WIDTH,
 )
@@ -23,6 +23,7 @@ def task(n: int, title: str = None, checklist=None, **kw) -> Task:
         area=kw.get("area"),
         contexts=kw.get("contexts", []),
         focused=kw.get("focused", False),
+        created_at=kw.get("created_at"),
         description=kw.get("description"),
         checklist=checklist or [],
     )
@@ -30,6 +31,16 @@ def task(n: int, title: str = None, checklist=None, **kw) -> Task:
 
 def item(n: int, completed: bool = False, title: str = None) -> ChecklistItem:
     return ChecklistItem(id="item-%d" % n, title=title or "Item %d" % n, completed=completed)
+
+
+# The header's own controls (home, sort direction, area/project toggles) are
+# always present regardless of task content — real, static hitboxes, not
+# something tests should mistake for "the header has nothing tappable".
+HEADER_CONTROL_KINDS = {"home", "sort_newest", "sort_oldest", "toggle_project_view", "toggle_area_view"}
+
+
+def _non_header_hitboxes(hitboxes):
+    return [b for b in hitboxes if b.kind not in HEADER_CONTROL_KINDS]
 
 
 class TestRender(unittest.TestCase):
@@ -41,11 +52,15 @@ class TestRender(unittest.TestCase):
     def test_shows_at_most_one_screenful_when_it_all_fits(self):
         rendered = render([task(i) for i in range(ROWS)], "next")
         # Three hitboxes (checkbox / text / star) per visible row, no pager.
-        self.assertEqual(len(rendered.hitboxes), ROWS * 3)
+        self.assertEqual(len(_non_header_hitboxes(rendered.hitboxes)), ROWS * 3)
 
-    def test_empty_list_renders_without_hitboxes(self):
+    def test_header_controls_are_always_present(self):
+        rendered = render([task(i) for i in range(ROWS)], "next")
+        self.assertEqual({b.kind for b in rendered.hitboxes} & HEADER_CONTROL_KINDS, HEADER_CONTROL_KINDS)
+
+    def test_empty_list_renders_without_task_hitboxes(self):
         rendered = render([], "next")
-        self.assertEqual(rendered.hitboxes, [])
+        self.assertEqual(_non_header_hitboxes(rendered.hitboxes), [])
 
     def test_long_title_is_ellipsized_not_overflowed(self):
         # Failure mode this guards: text running off the panel edge, which is
@@ -93,8 +108,10 @@ class TestListHitTesting(unittest.TestCase):
         box = hit(self.rendered.hitboxes, (TEXT_X + 10, y))
         self.assertEqual((box.kind, box.task_id), ("open", "task-0"))
 
-    def test_tap_on_header_or_footer_hits_nothing(self):
-        self.assertIsNone(hit(self.rendered.hitboxes, (400, 10)))
+    def test_tap_in_header_gap_or_footer_hits_nothing(self):
+        # Between the control cluster and the right-aligned date text —
+        # not one of the header's real controls, and not the footer either.
+        self.assertIsNone(hit(self.rendered.hitboxes, (650, 10)))
         self.assertIsNone(hit(self.rendered.hitboxes, (400, HEIGHT - 10)))
 
     def test_row_boundaries_do_not_overlap(self):
@@ -171,6 +188,61 @@ class TestListPagination(unittest.TestCase):
         plain = render(tasks, "focus").image
         no_boundary = render([task(i, focused=True) for i in range(10)], "focus").image
         self.assertNotEqual(plain.tobytes(), no_boundary.tobytes())
+
+
+def _dt(n: int) -> datetime:
+    return datetime(2026, 1, 1 + n)
+
+
+class TestOrganizeTasks(unittest.TestCase):
+    def test_default_sort_mode_preserves_fetch_order_and_allows_boundary(self):
+        tasks = [task(0, focused=True), task(1), task(2)]
+        entries, allow_boundary = _organize_tasks(tasks, None, False, False)
+        self.assertEqual([e[1].id for e in entries], ["task-0", "task-1", "task-2"])
+        self.assertTrue(allow_boundary)
+
+    def test_newest_first_sorts_by_created_date_descending(self):
+        tasks = [task(0, created_at=_dt(1)), task(1, created_at=_dt(3)), task(2, created_at=_dt(2))]
+        entries, allow_boundary = _organize_tasks(tasks, True, False, False)
+        self.assertEqual([e[1].id for e in entries], ["task-1", "task-2", "task-0"])
+        self.assertFalse(allow_boundary)
+
+    def test_oldest_first_sorts_ascending(self):
+        tasks = [task(0, created_at=_dt(1)), task(1, created_at=_dt(3)), task(2, created_at=_dt(2))]
+        entries, _ = _organize_tasks(tasks, False, False, False)
+        self.assertEqual([e[1].id for e in entries], ["task-0", "task-2", "task-1"])
+
+    def test_missing_created_at_sorts_to_the_oldest_end(self):
+        tasks = [task(0, created_at=_dt(1)), task(1, created_at=None)]
+        newest_first, _ = _organize_tasks(tasks, True, False, False)
+        self.assertEqual(newest_first[-1][1].id, "task-1")
+
+    def test_project_grouping_buckets_with_a_fallback_for_unfiled_tasks(self):
+        tasks = [task(0, project="Alpha"), task(1, project=None), task(2, project="Alpha")]
+        entries, allow_boundary = _organize_tasks(tasks, None, False, True)
+        kinds_and_labels = [(e[0], e[1] if e[0] == "header" else e[1].id) for e in entries]
+        self.assertEqual(
+            kinds_and_labels,
+            [("header", "Alpha"), ("task", "task-0"), ("task", "task-2"),
+             ("header", "No project"), ("task", "task-1")],
+        )
+        self.assertFalse(allow_boundary)
+
+    def test_area_and_project_nest_area_outer_project_inner(self):
+        tasks = [task(0, area="Digital", project="Alpha"), task(1, area="Digital", project="Beta")]
+        entries, _ = _organize_tasks(tasks, None, True, True)
+        levels = [(e[0], e[2] if e[0] == "header" else None) for e in entries]
+        self.assertEqual(
+            levels,
+            [("header", 0), ("header", 1), ("task", None), ("header", 1), ("task", None)],
+        )
+
+    def test_area_grouping_alone_ignores_project(self):
+        tasks = [task(0, area="Digital", project="Alpha"), task(1, area="Digital", project="Beta")]
+        entries, _ = _organize_tasks(tasks, None, True, False)
+        # One area header, then both tasks directly underneath — no project
+        # sub-headers since group_by_project is off.
+        self.assertEqual([e[0] for e in entries], ["header", "task", "task"])
 
 
 class TestDetailRendering(unittest.TestCase):

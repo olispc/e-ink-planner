@@ -51,6 +51,18 @@ LIST_TEXT_RIGHT = TEXT_RIGHT - STAR_ZONE_W  # title/meta ellipsis width in rende
 # competing for a fixed corner.
 DETAIL_STAR_ZONE_W = 56
 
+# List-view header controls: home (tap the view title), sort direction
+# (newest/oldest by created date), and area/project grouping. All fit in
+# the existing single header row — no extra height taken from the 6 body
+# rows, which are already scarce.
+SORT_ARROW_ACTIVE = 22        # the current direction draws bigger...
+SORT_ARROW_INACTIVE = 14      # ...the other one smaller, per spec
+GROUP_TOGGLE_BOX = 28         # small "P"/"A" boxes, heavier border when on
+
+# A group divider (area or project name) is half a task row — organizational
+# text, not a tappable item, so it doesn't need a task row's full height.
+GROUP_HEADER_H = ROW_H // 2
+
 BLACK, WHITE = 0, 1           # mode "1" pixel values
 
 # Candidates in preference order: DejaVu ships with Raspberry Pi OS

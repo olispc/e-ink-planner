@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from panel.client import ChecklistItem, MindwtrClient, Task  # noqa: E402
+from panel.client import ChecklistItem, MindwtrClient, Task, _parse_iso  # noqa: E402
 from panel.config import Config  # noqa: E402
 from panel.layout import render  # noqa: E402
 
@@ -34,6 +34,7 @@ def from_fixture(path: Path):
             area=t.get("area"),
             contexts=t.get("contexts", []),
             focused=t.get("focused", False),
+            created_at=_parse_iso(t.get("createdAt")),
             description=t.get("description"),
             checklist=[
                 ChecklistItem(id=c["id"], title=c["title"], completed=c.get("completed", False))
