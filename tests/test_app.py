@@ -194,14 +194,25 @@ class TestStarToggle(unittest.TestCase):
 
 
 class TestListPagination(unittest.TestCase):
-    def test_list_page_hitbox_advances_the_page(self):
+    def test_list_page_forward_zone_advances_the_page(self):
         panel = make_panel([task(i) for i in range(25)])
         panel.refresh()
         panel.draw(force=True)
 
-        pager = next(b for b in panel.hitboxes if b.kind == "list_page")
-        panel.handle_tap((400, pager.y0 + 10))
-        self.assertEqual(panel.list_page, pager.page)
+        pagers = [b for b in panel.hitboxes if b.kind == "list_page"]
+        forward = max(pagers, key=lambda b: b.x0)  # right half of the row
+        panel.handle_tap((forward.x0 + 10, forward.y0 + 10))
+        self.assertEqual(panel.list_page, forward.page)
+
+    def test_list_page_backward_zone_goes_back(self):
+        panel = make_panel([task(i) for i in range(25)])
+        panel.refresh()
+        panel.draw(force=True)
+
+        pagers = [b for b in panel.hitboxes if b.kind == "list_page"]
+        backward = min(pagers, key=lambda b: b.x0)  # left half of the row
+        panel.handle_tap((backward.x0 + 10, backward.y0 + 10))
+        self.assertEqual(panel.list_page, backward.page)
 
 
 if __name__ == "__main__":

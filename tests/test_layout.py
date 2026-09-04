@@ -108,25 +108,58 @@ class TestListHitTesting(unittest.TestCase):
         self.assertEqual((box.kind, box.task_id), ("star", "task-0"))
 
 
+def _forward_pager(hitboxes, kind):
+    """The right-half (next-page) hitbox of a kind that now has two — the
+    left half is previous. Identified by position, not list order, so a
+    reordering of the append calls in layout.py can't silently break this."""
+    candidates = [b for b in hitboxes if b.kind == kind]
+    return max(candidates, key=lambda b: b.x0) if candidates else None
+
+
+def _backward_pager(hitboxes, kind):
+    candidates = [b for b in hitboxes if b.kind == kind]
+    return min(candidates, key=lambda b: b.x0) if candidates else None
+
+
 class TestListPagination(unittest.TestCase):
     def test_no_pager_when_it_all_fits(self):
         rendered = render([task(i) for i in range(ROWS)], "next")
         self.assertEqual([b for b in rendered.hitboxes if b.kind == "list_page"], [])
 
-    def test_pager_appears_and_reaches_every_task(self):
+    def test_pager_has_independent_forward_and_back_zones(self):
         tasks = [task(i) for i in range(25)]
         rendered = render(tasks, "next")
         pagers = [b for b in rendered.hitboxes if b.kind == "list_page"]
-        self.assertEqual(len(pagers), 1)
+        self.assertEqual(len(pagers), 2)
+        fwd, back = _forward_pager(rendered.hitboxes, "list_page"), _backward_pager(rendered.hitboxes, "list_page")
+        self.assertNotEqual(fwd.page, back.page)
+        self.assertLess(back.x1, fwd.x0 + 1)  # back zone sits left of forward zone
 
+    def test_pager_appears_and_reaches_every_task(self):
+        tasks = [task(i) for i in range(25)]
+        rendered = render(tasks, "next")
         seen = {b.task_id for b in rendered.hitboxes if b.kind == "open"}
-        next_page = pagers[0].page
+        next_page = _forward_pager(rendered.hitboxes, "list_page").page
         guard = 0
         while next_page != 0 and guard < 20:
             r = render(tasks, "next", page=next_page)
             seen |= {b.task_id for b in r.hitboxes if b.kind == "open"}
-            p = [b for b in r.hitboxes if b.kind == "list_page"]
-            next_page = p[0].page if p else 0
+            fwd = _forward_pager(r.hitboxes, "list_page")
+            next_page = fwd.page if fwd else 0
+            guard += 1
+        self.assertEqual(seen, {"task-%d" % i for i in range(25)})
+
+    def test_backward_pager_also_reaches_every_task(self):
+        tasks = [task(i) for i in range(25)]
+        rendered = render(tasks, "next")
+        seen = {b.task_id for b in rendered.hitboxes if b.kind == "open"}
+        prev_page = _backward_pager(rendered.hitboxes, "list_page").page
+        guard = 0
+        while prev_page != 0 and guard < 20:
+            r = render(tasks, "next", page=prev_page)
+            seen |= {b.task_id for b in r.hitboxes if b.kind == "open"}
+            back = _backward_pager(r.hitboxes, "list_page")
+            prev_page = back.page if back else 0
             guard += 1
         self.assertEqual(seen, {"task-%d" % i for i in range(25)})
 
@@ -242,38 +275,60 @@ class TestDetailRendering(unittest.TestCase):
         ticked = render_detail(task(1, checklist=done_checklist), expanded=True).image
         self.assertNotEqual(plain.tobytes(), ticked.tobytes())
 
-    def test_many_unchecked_items_paginate_rather_than_vanish(self):
+    def test_pager_has_independent_forward_and_back_zones(self):
         checklist = [item(i, completed=False) for i in range(30)]
         rendered = render_detail(task(1, checklist=checklist))
         pages = [b for b in rendered.hitboxes if b.kind == "page"]
-        self.assertEqual(len(pages), 1)
+        self.assertEqual(len(pages), 2)
+        fwd = _forward_pager(rendered.hitboxes, "page")
+        back = _backward_pager(rendered.hitboxes, "page")
+        self.assertNotEqual(fwd.page, back.page)
+        self.assertLess(back.x1, fwd.x0 + 1)
+
+    def test_many_unchecked_items_paginate_rather_than_vanish(self):
+        checklist = [item(i, completed=False) for i in range(30)]
+        rendered = render_detail(task(1, checklist=checklist))
         # Every item must be reachable across some page, not just page 0 —
-        # walk the "page" hitbox's target until back at 0, collecting ids.
+        # walk the forward pager's target until back at 0, collecting ids.
         seen = {b.item_id for b in rendered.hitboxes if b.kind == "toggle"}
-        next_page = pages[0].page
+        next_page = _forward_pager(rendered.hitboxes, "page").page
         guard = 0
         while next_page != 0 and guard < 20:
             r = render_detail(task(1, checklist=checklist), page=next_page)
             seen |= {b.item_id for b in r.hitboxes if b.kind == "toggle"}
-            p = [b for b in r.hitboxes if b.kind == "page"]
-            next_page = p[0].page if p else 0
+            fwd = _forward_pager(r.hitboxes, "page")
+            next_page = fwd.page if fwd else 0
+            guard += 1
+        self.assertEqual(seen, {"item-%d" % i for i in range(30)})
+
+    def test_backward_pager_also_reaches_every_item(self):
+        checklist = [item(i, completed=False) for i in range(30)]
+        rendered = render_detail(task(1, checklist=checklist))
+        seen = {b.item_id for b in rendered.hitboxes if b.kind == "toggle"}
+        prev_page = _backward_pager(rendered.hitboxes, "page").page
+        guard = 0
+        while prev_page != 0 and guard < 20:
+            r = render_detail(task(1, checklist=checklist), page=prev_page)
+            seen |= {b.item_id for b in r.hitboxes if b.kind == "toggle"}
+            back = _backward_pager(r.hitboxes, "page")
+            prev_page = back.page if back else 0
             guard += 1
         self.assertEqual(seen, {"item-%d" % i for i in range(30)})
 
     def test_page_wraps_around_from_the_last_page(self):
         checklist = [item(i, completed=False) for i in range(30)]
         first = render_detail(task(1, checklist=checklist))
-        first_page_control = next(b for b in first.hitboxes if b.kind == "page")
+        first_page_control = _forward_pager(first.hitboxes, "page")
         last = render_detail(task(1, checklist=checklist), page=first_page_control.page)
         # However many pages there are, walking "next" from page 0 and
         # landing back on 0 confirms wraparound rather than running off past
         # the end into an empty page.
         pages_visited = {0, first_page_control.page}
-        p = next((b for b in last.hitboxes if b.kind == "page"), None)
+        p = _forward_pager(last.hitboxes, "page")
         while p is not None and p.page not in pages_visited:
             pages_visited.add(p.page)
             r = render_detail(task(1, checklist=checklist), page=p.page)
-            p = next((b for b in r.hitboxes if b.kind == "page"), None)
+            p = _forward_pager(r.hitboxes, "page")
         self.assertIn(0, pages_visited)
 
     def test_out_of_range_page_clamps_instead_of_rendering_empty(self):

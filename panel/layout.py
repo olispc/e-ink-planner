@@ -120,15 +120,21 @@ def _draw_check(d: ImageDraw.ImageDraw, x0: int, y0: int, size: int) -> None:
 
 
 def _draw_disclosure(d: ImageDraw.ImageDraw, x0: int, y0: int, size: int, direction: str) -> None:
-    """Small triangle in the checkbox column, marking a row that stands in
-    for several others rather than being an item of its own: right-pointing
-    for "tap to reveal" (expand a stack, or page to more), down-pointing for
-    "tap to hide" (collapse back)."""
+    """Small triangle marking a row that stands in for several others
+    rather than being an item of its own: right for "tap to reveal" (expand
+    a stack) or "next page", left for "previous page", down for "tap to
+    hide" (collapse back)."""
     if direction == "down":
         points = [
             (x0 + size * 0.15, y0 + size * 0.30),
             (x0 + size * 0.85, y0 + size * 0.30),
             (x0 + size * 0.5, y0 + size * 0.80),
+        ]
+    elif direction == "left":
+        points = [
+            (x0 + size * 0.78, y0 + size * 0.15),
+            (x0 + size * 0.78, y0 + size * 0.85),
+            (x0 + size * 0.22, y0 + size * 0.5),
         ]
     else:
         points = [
@@ -279,13 +285,21 @@ def render(
         pi = len(visible)
         y0 = HEADER_H + pi * ROW_H
         y1 = y0 + ROW_H
+        mid = WIDTH // 2
+        prev_page = (page - 1) % total_pages
         next_page = (page + 1) % total_pages
-        hitboxes.append(Hitbox("list_page", 0, WIDTH, y0, y1, page=next_page))
+        # Split the row itself rather than adding a second row — screen
+        # space here is already scarce, and a half-row target is still well
+        # past the ~9mm minimum thumb tap (see theme.py).
+        hitboxes.append(Hitbox("list_page", 0, mid, y0, y1, page=prev_page))
+        hitboxes.append(Hitbox("list_page", mid, WIDTH, y0, y1, page=next_page))
         box_y = y0 + (ROW_H - BOX) // 2
-        _draw_disclosure(d, BOX_X, box_y, BOX, direction="right")
+        _draw_disclosure(d, BOX_X, box_y, BOX, direction="left")
+        _draw_disclosure(d, WIDTH - MARGIN - BOX, box_y, BOX, direction="right")
+        label = "page %d/%d" % (page + 1, total_pages)
         d.text(
-            (TEXT_X, y0 + 20), "page %d/%d — tap for more" % (page + 1, total_pages),
-            font=f.title, fill=BLACK,
+            ((WIDTH - _text_width(d, label, f.title)) // 2, y0 + 20),
+            label, font=f.title, fill=BLACK,
         )
 
     # --- footer -----------------------------------------------------------
@@ -460,12 +474,17 @@ def render_detail(
         iy1 = iy0 + DETAIL_ROW_H
         box_y2 = iy0 + DETAIL_BOX_Y_OFFSET
         text_y = iy0 + (DETAIL_ROW_H - 20) // 2
+        mid = WIDTH // 2
+        prev_page = (page - 1) % total_pages
         next_page = (page + 1) % total_pages
-        hitboxes.append(Hitbox("page", 0, WIDTH, iy0, iy1, task_id=task.id, page=next_page))
-        _draw_disclosure(d, BOX_X, box_y2, DETAIL_BOX, direction="right")
+        hitboxes.append(Hitbox("page", 0, mid, iy0, iy1, task_id=task.id, page=prev_page))
+        hitboxes.append(Hitbox("page", mid, WIDTH, iy0, iy1, task_id=task.id, page=next_page))
+        _draw_disclosure(d, BOX_X, box_y2, DETAIL_BOX, direction="left")
+        _draw_disclosure(d, TEXT_RIGHT - DETAIL_BOX, box_y2, DETAIL_BOX, direction="right")
+        label = "page %d/%d" % (page + 1, total_pages)
         d.text(
-            (item_text_x, text_y), "page %d/%d — tap for more" % (page + 1, total_pages),
-            font=f.meta, fill=BLACK,
+            ((WIDTH - _text_width(d, label, f.meta)) // 2, text_y),
+            label, font=f.meta, fill=BLACK,
         )
 
     # --- footer: checklist progress, not a poll timestamp -------------------
