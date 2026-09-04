@@ -15,11 +15,11 @@ from PIL import Image, ImageDraw
 
 from .client import Task
 from .theme import (
-    BLACK, BOX, BOX_X, DETAIL_BOX, DETAIL_BOX_Y_OFFSET, DETAIL_ROW_H,
-    DETAIL_STAR_ZONE_W, FOOTER_H, GROUP_HEADER_H, GROUP_TOGGLE_BOX,
-    HEADER_H, HEIGHT, LIST_TEXT_RIGHT, MARGIN, ROW_H, ROWS,
-    SORT_ARROW_ACTIVE, SORT_ARROW_INACTIVE, STAR_SIZE, STAR_ZONE_W,
-    TEXT_RIGHT, TEXT_X, WHITE, WIDTH, fonts,
+    BLACK, BOX, BOX_X, COLLAPSED_FOOTER_H, DETAIL_BOX, DETAIL_BOX_Y_OFFSET,
+    DETAIL_ROW_H, DETAIL_STAR_ZONE_W, FOCUS_STAR_SIZE, FOOTER_H,
+    GROUP_HEADER_H, GROUP_ICON_SIZE, GROUP_TOGGLE_BOX, HEADER_H, HEIGHT,
+    LIST_TEXT_RIGHT, MARGIN, ROW_H, ROWS, SORT_ARROW_SIZE, STAR_SIZE,
+    STAR_ZONE_W, SYNC_ICON_SIZE, TEXT_RIGHT, TEXT_X, WHITE, WIDTH, fonts,
 )
 
 VIEW_TITLES = {
@@ -50,6 +50,12 @@ class Hitbox:
     - "page"      — jump to checklist page `page` (detail view, wraps around)
     - "star"      — flip task_id's isFocusedToday (list row or detail title)
     - "list_page" — jump to list page `page` (list view, wraps around)
+    - "home"      — list page back to 0, sort/grouping toggles untouched
+    - "focus_sticky"      — flip whether starred-today tasks pin to the top
+    - "sort_toggle"       — flip sort_newest direction
+    - "toggle_area_view"  — flip area grouping
+    - "toggle_project_view" — flip project grouping
+    - "toggle_due_first"  — flip whether due-dated backlog tasks lead
     """
     kind: str
     x0: int
@@ -162,29 +168,95 @@ def _draw_star(d: ImageDraw.ImageDraw, cx: int, cy: int, size: int, filled: bool
         d.polygon(points, outline=BLACK, width=2)
 
 
-def _draw_arrow(d: ImageDraw.ImageDraw, cx: int, cy: int, size: int, up: bool, active: bool) -> None:
-    """Sort-direction arrow: the active direction draws bigger and filled,
-    the inactive one small and outlined — the size difference is the
-    affordance, no extra label needed to tell them apart."""
+def _draw_arrow(d: ImageDraw.ImageDraw, cx: int, cy: int, size: int, up: bool) -> None:
+    """Sort direction, one button: shows whichever direction is currently
+    active (newest-first = up, oldest-first = down). Filled, since there's
+    no "other" arrow alongside it to contrast against."""
     half = size / 2
     if up:
         points = [(cx, cy - half), (cx - half, cy + half), (cx + half, cy + half)]
     else:
         points = [(cx, cy + half), (cx - half, cy - half), (cx + half, cy - half)]
-    if active:
-        d.polygon(points, fill=BLACK)
-    else:
-        d.polygon(points, outline=BLACK, width=2)
+    d.polygon(points, fill=BLACK)
 
 
-def _draw_toggle_box(d: ImageDraw.ImageDraw, x0: int, y0: int, size: int, label: str, on: bool) -> None:
-    """Small lettered box for a view toggle (project/area grouping) — same
-    heavier-border-means-on language as a focused task's checkbox, so a new
-    control doesn't need a new visual vocabulary."""
+def _draw_folder_icon(d: ImageDraw.ImageDraw, x0: int, y0: int, size: int) -> None:
+    """Mindwtr's own project icon (lucide-react's `Folder`, confirmed
+    against apps/desktop/src/components/views/projects/ProjectsSidebar.tsx)
+    — a recognizable link to the app this panel is a window onto, not an
+    invented glyph."""
+    w, h = size, size * 0.8
+    tab_w, tab_h = w * 0.5, h * 0.28
+    d.rectangle([x0, y0 + tab_h, x0 + w, y0 + h], outline=BLACK, width=2)
+    d.rectangle([x0, y0, x0 + tab_w, y0 + tab_h + 1], outline=BLACK, width=2)
+
+
+def _draw_layers_icon(d: ImageDraw.ImageDraw, x0: int, y0: int, size: int) -> None:
+    """Areas have no single fixed icon in Mindwtr — each one carries a
+    user-chosen emoji there (AreaManagerModal), which a 1-bit DejaVu render
+    can't reproduce anyway. This custom glyph — three stacked flattened
+    diamonds, distinct shapes with real gaps rather than overlapping
+    rectangles that blur together at this size — echoes the `Layers` icon
+    Mindwtr's own area filter already uses, without claiming to be any
+    specific area's actual icon."""
+    w, h = size, size * 0.34
+    gap = size * 0.3
+    for i in range(3):
+        cy = y0 + h / 2 + i * gap
+        d.polygon(
+            [
+                (x0 + w / 2, cy - h / 2), (x0 + w, cy),
+                (x0 + w / 2, cy + h / 2), (x0, cy),
+            ],
+            outline=BLACK, width=2,
+        )
+
+
+def _draw_sync_icon(d: ImageDraw.ImageDraw, cx: int, cy: int, size: int) -> None:
+    """Small refresh glyph next to the header's "updated HH:MM" — an
+    open arc with one arrowhead, the standard sync-icon shorthand."""
+    r = size / 2
+    d.arc([cx - r, cy - r, cx + r, cy + r], start=25, end=290, fill=BLACK, width=2)
+    angle = math.radians(25)
+    tip = (cx + r * math.cos(angle), cy + r * math.sin(angle))
+    # Arrowhead scales with the arc — fixed pixel offsets here (tuned for an
+    # 18px icon) swallowed a 12px one into an unrecognizable blob.
+    s = r / 9.0
+    d.polygon(
+        [
+            (tip[0] - 4 * s, tip[1] - 1 * s),
+            (tip[0] + 1 * s, tip[1] - 5 * s),
+            (tip[0] + 3 * s, tip[1] + 3 * s),
+        ],
+        fill=BLACK,
+    )
+
+
+def _draw_calendar_icon(d: ImageDraw.ImageDraw, x0: float, y0: float, size: float) -> None:
+    """A minimal calendar glyph — bordered body, a header band, two binding
+    rings — for the due-date-first header toggle."""
+    top = y0 + size * 0.18
+    d.rectangle([x0, top, x0 + size, y0 + size], outline=BLACK, width=2)
+    band_h = size * 0.22
+    d.line([(x0, top + band_h), (x0 + size, top + band_h)], fill=BLACK, width=2)
+    for rx in (x0 + size * 0.25, x0 + size * 0.75):
+        d.line([(rx, y0), (rx, top + band_h * 0.5)], fill=BLACK, width=2)
+
+
+def _draw_toggle_box(d: ImageDraw.ImageDraw, x0: int, y0: int, size: int, icon: str, on: bool) -> None:
+    """Small icon box for a view toggle (project/area grouping, due-date-
+    first) — same heavier-border-means-on language as a focused task's
+    checkbox, so a new control doesn't need a new visual vocabulary."""
     d.rectangle([x0, y0, x0 + size, y0 + size], outline=BLACK, width=3 if on else 1)
-    f = fonts()
-    w = _text_width(d, label, f.footer)
-    d.text((x0 + (size - w) / 2, y0 + size / 2 - 8), label, font=f.footer, fill=BLACK)
+    icon_size = GROUP_ICON_SIZE
+    ix = x0 + (size - icon_size) / 2
+    iy = y0 + (size - icon_size * 0.8) / 2
+    if icon == "project":
+        _draw_folder_icon(d, ix, iy, icon_size)
+    elif icon == "due":
+        _draw_calendar_icon(d, ix, iy, icon_size)
+    else:
+        _draw_layers_icon(d, ix, iy, icon_size)
 
 
 def _strike_line(d: ImageDraw.ImageDraw, x: int, y: int, text: str, font, width: int = 2) -> None:
@@ -215,56 +287,197 @@ def _meta_line(task: Task, hide_project: bool = False, hide_area: bool = False) 
     return "  ·  ".join(bits)
 
 
-def _organize_tasks(
-    tasks: Sequence[Task],
-    sort_mode: Optional[bool],
+def _relative_age(created_at: datetime, now: datetime) -> str:
+    """"added N ago", compact enough to share a row with project/area/
+    contexts on either the list or detail view's meta line. Calendar-day
+    difference, not a raw timedelta — a task added at 11pm
+    yesterday should read "added yesterday" at 1am today, not "added 0d
+    ago" just because fewer than 24 raw hours have passed."""
+    days = (now.date() - created_at.date()).days
+    if days <= 0:
+        return "added today"
+    if days == 1:
+        return "added yesterday"
+    if days < 7:
+        return "added %dd ago" % days
+    weeks = days // 7
+    if weeks < 8:
+        return "added %dw ago" % weeks
+    months = days // 30
+    if months < 24:
+        return "added %dmo ago" % months
+    return "added %dy ago" % (days // 365)
+
+
+def _format_due(due: datetime, now: datetime) -> str:
+    """"due ..." / "overdue ...", same calendar-day-difference basis as
+    _relative_age. Anything a week or more out just shows the date, matching
+    the header's own short date style, rather than "due in 19d"."""
+    days = (due.date() - now.date()).days
+    if days < 0:
+        return "overdue %dd" % -days
+    if days == 0:
+        return "due today"
+    if days == 1:
+        return "due tomorrow"
+    if days < 7:
+        return "due in %dd" % days
+    return "due %s" % due.strftime("%-d %b")
+
+
+def _append_age_due(meta: str, task: Task, now: datetime) -> str:
+    """Appends "added N ago" / "due ..." to an existing meta string, in the
+    same "  ·  "-joined run as project/area/contexts rather than a row of
+    their own — shared by the list view's row meta and the detail view's,
+    so a task reads the same age/due info wherever it's shown."""
+    extra = []
+    if task.created_at:
+        extra.append(_relative_age(task.created_at, now))
+    if task.due_date:
+        extra.append(_format_due(task.due_date, now))
+    if not extra:
+        return meta
+    return "  ·  ".join([meta] + extra) if meta else "  ·  ".join(extra)
+
+
+def _sort_by_date(items: Sequence[Task], sort_newest: bool) -> List[Task]:
+    key = lambda t: t.created_at or datetime.min  # noqa: E731
+    return sorted(items, key=key, reverse=sort_newest)
+
+
+def _sort_backlog(items: Sequence[Task], sort_newest: bool, due_first: bool) -> List[Task]:
+    """The backlog's own ordering — plain sort_newest, or (when due_first is
+    on) due-dated tasks first, soonest due date leading, then everything
+    else in the usual sort_newest order. Never applied to the leading
+    focused/starred section (see _organize_tasks) — due_first is scoped to
+    "the non-starred list," matching what pushing a due date to the top
+    should and shouldn't touch. Urgency isn't a newest/oldest-created
+    concept, so the due-dated subset ignores sort_newest entirely and always
+    goes soonest-first.
+    """
+    if not due_first:
+        return _sort_by_date(items, sort_newest)
+    has_due = [t for t in items if t.due_date is not None]
+    no_due = [t for t in items if t.due_date is None]
+    has_due.sort(key=lambda t: t.due_date)
+    return has_due + _sort_by_date(no_due, sort_newest)
+
+
+def _group_date_key(tasks: Sequence[Task], sort_newest: bool) -> datetime:
+    """A group's own representative date for ordering headers by
+    sort_newest: its most-recently-created task when sorting newest-first,
+    its least-recently-created one when sorting oldest-first — the same
+    task that would end up at the top of that group's own task list."""
+    dates = [t.created_at or datetime.min for t in tasks]
+    return max(dates) if sort_newest else min(dates)
+
+
+def _grouped_entries(
+    items: Sequence[Task],
+    sort_newest: bool,
     group_by_area: bool,
     group_by_project: bool,
-) -> Tuple[List[tuple], bool]:
-    """Turns the fetched, already-ordered task list into a stream of
-    ("task", Task) and ("header", label, level) entries, per the current
-    sort/group toggles. Returns (entries, allow_boundary) — allow_boundary
-    is True only when neither toggle is active, since the focused/backlog
-    heavy rule is a property of the default fetch order and doesn't have a
-    coherent meaning once that order has been overridden.
+    due_first: bool,
+) -> List[tuple]:
+    """Bucket by area and/or project. With both on, this emits one combined
+    "Area / Project" header per pair rather than nesting two header levels —
+    a page rarely holds more than one project under a given area heading
+    anyway. Each task entry is flagged `in_group=True` so render() knows a
+    header above it already states whichever of project/area it's grouped
+    by, and can skip repeating that in the row's own meta line.
 
-    sort_mode: None = fetch order as-is (focused-first); True = newest
-    created first; False = oldest first. Grouping buckets by area and/or
-    project (dict insertion order, so each bucket's own task order is
-    whatever sort_mode already produced) — area outer, project nested
-    inside when both are on, matching how the header toggles are meant to
-    combine.
+    Groups are ordered by sort_newest too, via _group_date_key — not dict
+    insertion order, which was really just "whichever task happened to sit
+    first in the raw fetch" and had nothing to do with the sort toggle, so
+    flipping it visibly reordered tasks within a group but left the groups
+    themselves seemingly frozen. The fallback ("No area" / "No project")
+    group is the exception: it always sorts last regardless of direction,
+    since it's an absence of the thing being grouped by, not a real bucket
+    whose recency is meaningful — left in the running, it could otherwise
+    land in the middle of the page and split up real groups around it.
+
+    due_first reorders tasks within each group (via _sort_backlog) but never
+    the groups themselves — group header order stays sort_newest-only.
     """
-    ordered = list(tasks)
-    if sort_mode is not None:
-        ordered.sort(key=lambda t: t.created_at or datetime.min, reverse=sort_mode)
-
-    if not group_by_area and not group_by_project:
-        return [("task", t) for t in ordered], sort_mode is None
-
-    def bucket(items: Sequence[Task], key_fn, fallback: str) -> "dict[str, list]":
+    def bucket(source: Sequence[Task], key_fn, fallback: str) -> List[tuple]:
         buckets: "dict[str, list]" = {}
-        for t in items:
+        for t in source:
             key = key_fn(t) or fallback
             buckets.setdefault(key, []).append(t)
-        return buckets
+        unfiled = buckets.pop(fallback, None)
+        named = sorted(
+            buckets.items(),
+            key=lambda kv: _group_date_key(kv[1], sort_newest),
+            reverse=sort_newest,
+        )
+        if unfiled is not None:
+            named.append((fallback, unfiled))
+        return named
 
     entries: List[tuple] = []
-    if group_by_area:
-        for area_name, area_tasks in bucket(ordered, lambda t: t.area, "No area").items():
-            entries.append(("header", area_name, 0))
-            if group_by_project:
-                projects = bucket(area_tasks, lambda t: t.project, "No project")
-                for proj_name, proj_tasks in projects.items():
-                    entries.append(("header", proj_name, 1))
-                    entries.extend(("task", t) for t in proj_tasks)
-            else:
-                entries.extend(("task", t) for t in area_tasks)
+    if group_by_area and group_by_project:
+        for area_name, area_tasks in bucket(items, lambda t: t.area, "No area"):
+            for proj_name, proj_tasks in bucket(area_tasks, lambda t: t.project, "No project"):
+                label = area_name if proj_name == "No project" else "%s / %s" % (area_name, proj_name)
+                entries.append(("header", label, "both"))
+                entries.extend(("task", t, True) for t in _sort_backlog(proj_tasks, sort_newest, due_first))
+    elif group_by_area:
+        for area_name, area_tasks in bucket(items, lambda t: t.area, "No area"):
+            entries.append(("header", area_name, "area"))
+            entries.extend(("task", t, True) for t in _sort_backlog(area_tasks, sort_newest, due_first))
     else:  # project grouping only
-        for proj_name, proj_tasks in bucket(ordered, lambda t: t.project, "No project").items():
-            entries.append(("header", proj_name, 0))
-            entries.extend(("task", t) for t in proj_tasks)
-    return entries, False
+        for proj_name, proj_tasks in bucket(items, lambda t: t.project, "No project"):
+            entries.append(("header", proj_name, "project"))
+            entries.extend(("task", t, True) for t in _sort_backlog(proj_tasks, sort_newest, due_first))
+    return entries
+
+
+def _organize_tasks(
+    tasks: Sequence[Task],
+    sort_newest: bool,
+    focus_sticky: bool,
+    group_by_area: bool,
+    group_by_project: bool,
+    due_first: bool = False,
+) -> Tuple[List[tuple], bool]:
+    """Turns the fetched task list into a stream of ("task", Task, in_group)
+    and ("header", label, icon) entries, per the current toggles.
+    Returns (entries, allow_boundary) — the heavy focused/backlog rule only
+    means something when focus_sticky guarantees a clean partition; with it
+    off, a focused task could land anywhere in date order, and drawing the
+    rule at that arbitrary point would look like a real boundary that isn't.
+
+    Focus-sticky always wins, even over grouping: whenever it's on, focused-
+    today tasks form their own flat leading section — sorted by sort_newest,
+    never bucketed by area/project even when grouping is also on, since
+    starring is a stronger signal than either. Sort direction and grouping
+    apply only to the backlog beneath the heavy rule; a page with nothing
+    starred today has no leading section and no rule, same as before. Each
+    task entry's `in_group` flag is False for this leading section (nothing
+    states its project/area for it) even when the backlog beneath it is
+    grouped and flags its own entries True.
+
+    due_first never touches this leading section either — it's scoped to
+    "the non-starred list" by construction, since the focused section always
+    sorts via plain _sort_by_date while everything else goes through
+    _sort_backlog.
+    """
+    ordered = list(tasks)
+    grouping = group_by_area or group_by_project
+
+    if not focus_sticky:
+        if not grouping:
+            return [("task", t, False) for t in _sort_backlog(ordered, sort_newest, due_first)], False
+        return _grouped_entries(ordered, sort_newest, group_by_area, group_by_project, due_first), False
+
+    focused = [t for t in ordered if t.focused]
+    rest = [t for t in ordered if not t.focused]
+    entries: List[tuple] = [("task", t, False) for t in _sort_by_date(focused, sort_newest)]
+    if grouping:
+        entries.extend(_grouped_entries(rest, sort_newest, group_by_area, group_by_project, due_first))
+    else:
+        entries.extend(("task", t, False) for t in _sort_backlog(rest, sort_newest, due_first))
+    return entries, True
 
 
 def _entry_height(entry: tuple) -> int:
@@ -303,9 +516,11 @@ def render(
     stale_since: Optional[datetime] = None,
     completing: Optional[str] = None,
     page: int = 0,
-    sort_mode: Optional[bool] = None,
+    sort_newest: bool = False,
+    focus_sticky: bool = True,
     group_by_area: bool = False,
     group_by_project: bool = False,
+    due_first: bool = False,
 ) -> Rendered:
     now = now or datetime.now()
     f = fonts()
@@ -315,21 +530,30 @@ def render(
     all_tasks = list(tasks)
     total = len(all_tasks) if total is None else total
 
-    entries, allow_boundary = _organize_tasks(all_tasks, sort_mode, group_by_area, group_by_project)
-    available_h = HEIGHT - HEADER_H - FOOTER_H
+    entries, allow_boundary = _organize_tasks(
+        all_tasks, sort_newest, focus_sticky, group_by_area, group_by_project, due_first
+    )
+    # The footer only has something to say when offline — otherwise it's
+    # dead space "updated HH:MM" (now in the header, see below) used to
+    # spend on every single render. Collapsing it to a bare rule when
+    # online gives that back to pagination/grouping headroom.
+    footer_h = FOOTER_H if stale_since is not None else COLLAPSED_FOOTER_H
+    available_h = HEIGHT - HEADER_H - footer_h
     pages, needs_paging = _paginate(entries, available_h, ROW_H)
     total_pages = len(pages)
     page = max(0, min(page, total_pages - 1))
     visible = pages[page]
 
-    # --- header -------------------------------------------------------------
+    # --- header: title/home, small controls, then date -----------------------
     title_text = VIEW_TITLES.get(view, view.upper())
     d.text((MARGIN, 20), title_text, font=f.header, fill=BLACK)
-    # Tapping the title is "home": back to page 1. Sort/group toggles are
-    # deliberately untouched by it — see the header controls below, which
-    # are the only way to change them, so a stray tap here can't reset a
-    # view you set up on purpose.
+    # Tapping the title is "home": back to page 1. Sort/group/sticky toggles
+    # are deliberately untouched by it — the header controls below are the
+    # only way to change them, so a stray tap here can't reset a view you
+    # set up on purpose.
     hitboxes: List[Hitbox] = [Hitbox("home", 0, MARGIN + _text_width(d, title_text, f.header) + 16, 0, HEADER_H)]
+
+    ctrl_y = 30
 
     right = now.strftime("%a %-d %b")
     # In the focus view the useful number is what you chose for today, not the
@@ -337,40 +561,50 @@ def render(
     headline = sum(1 for t in all_tasks if t.focused) if view == "focus" else total
     if headline:
         right = "%d  ·  %s" % (headline, right)
-    d.text(
-        (TEXT_RIGHT - _text_width(d, right, f.header_right), 21),
-        right, font=f.header_right, fill=BLACK,
-    )
+    date_x = TEXT_RIGHT - _text_width(d, right, f.header_right)
+    d.text((date_x, 21), right, font=f.header_right, fill=BLACK)
 
-    # --- header controls: sort direction, area/project grouping ------------
-    # Anchored to a fixed mid-header position rather than relative to the
-    # (variable-width) title or date text, so neither can ever collide with
-    # this cluster regardless of which view's title is showing.
-    cluster_cx = WIDTH // 2
-    arrow_y = 30
-    up_cx, down_cx = cluster_cx - 90, cluster_cx - 50
-    newest_active = sort_mode is True
-    oldest_active = sort_mode is False
-    _draw_arrow(
-        d, up_cx, arrow_y, SORT_ARROW_ACTIVE if newest_active else SORT_ARROW_INACTIVE,
-        up=True, active=newest_active,
-    )
-    _draw_arrow(
-        d, down_cx, arrow_y, SORT_ARROW_ACTIVE if oldest_active else SORT_ARROW_INACTIVE,
-        up=False, active=oldest_active,
-    )
-    hitboxes.append(Hitbox("sort_newest", up_cx - 18, up_cx + 18, 0, HEADER_H))
-    hitboxes.append(Hitbox("sort_oldest", down_cx - 18, down_cx + 18, 0, HEADER_H))
+    # Routine status — "updated HH:MM" plus how much wasn't even fetched —
+    # sits right-aligned next to the date, grouped with it as read-only status
+    # text rather than with the star/arrow/toggle cluster below: those are the
+    # only things on this header a tap actually changes, and a smaller icon
+    # plus footer-sized text keeps this from reading as a 5th control.
+    updated_text = "updated %s" % now.strftime("%H:%M")
+    not_fetched = total - len(all_tasks)
+    if not_fetched > 0:
+        updated_text += "  ·  %d more" % not_fetched
+    updated_text_x = date_x - 30 - _text_width(d, updated_text, f.footer)
+    sync_cx = updated_text_x - SYNC_ICON_SIZE / 2 - 6
+    _draw_sync_icon(d, sync_cx, ctrl_y, SYNC_ICON_SIZE)
+    d.text((updated_text_x, ctrl_y - 6), updated_text, font=f.footer, fill=BLACK)
 
-    proj_x, area_x = cluster_cx - 10, cluster_cx + 30
-    box_y = arrow_y - GROUP_TOGGLE_BOX // 2
-    _draw_toggle_box(d, proj_x, box_y, GROUP_TOGGLE_BOX, "P", group_by_project)
-    _draw_toggle_box(d, area_x, box_y, GROUP_TOGGLE_BOX, "A", group_by_area)
+    # --- header controls: focus-sticky, sort direction, area/project -------
+    # Anchored to fixed positions rather than relative to the (variable-
+    # width) title or date text, so neither can ever collide with this
+    # cluster regardless of which view's title or how long "N more" runs.
+    star_cx, arrow_cx = 235, 275
+    _draw_star(d, star_cx, ctrl_y, FOCUS_STAR_SIZE, filled=focus_sticky)
+    hitboxes.append(Hitbox("focus_sticky", star_cx - 16, star_cx + 16, 0, HEADER_H))
+    # One button, not two: with focus_sticky handling "important first"
+    # separately, sort has nothing a third "unsorted" state would mean —
+    # newest-first draws up, oldest-first draws down, tap flips it.
+    _draw_arrow(d, arrow_cx, ctrl_y, SORT_ARROW_SIZE, up=sort_newest)
+    hitboxes.append(Hitbox("sort_toggle", arrow_cx - 16, arrow_cx + 16, 0, HEADER_H))
+
+    area_x, proj_x = 305, 305 + GROUP_TOGGLE_BOX + 8
+    cal_x = proj_x + GROUP_TOGGLE_BOX + 8
+    box_y = ctrl_y - GROUP_TOGGLE_BOX // 2
+    _draw_toggle_box(d, area_x, box_y, GROUP_TOGGLE_BOX, "area", group_by_area)
+    _draw_toggle_box(d, proj_x, box_y, GROUP_TOGGLE_BOX, "project", group_by_project)
+    _draw_toggle_box(d, cal_x, box_y, GROUP_TOGGLE_BOX, "due", due_first)
+    hitboxes.append(
+        Hitbox("toggle_area_view", area_x - 4, area_x + GROUP_TOGGLE_BOX + 4, 0, HEADER_H)
+    )
     hitboxes.append(
         Hitbox("toggle_project_view", proj_x - 4, proj_x + GROUP_TOGGLE_BOX + 4, 0, HEADER_H)
     )
     hitboxes.append(
-        Hitbox("toggle_area_view", area_x - 4, area_x + GROUP_TOGGLE_BOX + 4, 0, HEADER_H)
+        Hitbox("toggle_due_first", cal_x - 4, cal_x + GROUP_TOGGLE_BOX + 4, 0, HEADER_H)
     )
 
     d.line([(MARGIN, HEADER_H - 8), (TEXT_RIGHT, HEADER_H - 8)], fill=BLACK, width=2)
@@ -392,15 +626,23 @@ def render(
     for i, entry in enumerate(visible):
         kind = entry[0]
         if kind == "header":
-            _, label, level = entry
+            _, label, icon = entry
             h = GROUP_HEADER_H
-            x = MARGIN if level == 0 else TEXT_X
-            d.text((x, y + 6), label, font=f.meta, fill=BLACK)
+            icon_size = GROUP_ICON_SIZE * 0.8
+            icon_y = y + (h - icon_size) / 2
+            if icon in ("area", "both"):
+                _draw_layers_icon(d, MARGIN, icon_y, icon_size)
+            if icon == "project":
+                _draw_folder_icon(d, MARGIN, icon_y, icon_size)
+            elif icon == "both":
+                _draw_folder_icon(d, MARGIN + icon_size + 6, icon_y, icon_size)
+            text_x = MARGIN + (icon_size * 2 + 12 if icon == "both" else icon_size + 8)
+            d.text((text_x, y + 6), label, font=f.meta, fill=BLACK)
             d.line([(MARGIN, y + h), (TEXT_RIGHT, y + h)], fill=BLACK, width=1)
             y += h
             continue
 
-        task = entry[1]
+        task, in_group = entry[1], entry[2]
         y0, y1 = y, y + ROW_H
         # Split per row, not per task: checkbox completes, text opens
         # detail, the star column (far right) toggles today's focus — see
@@ -421,7 +663,16 @@ def render(
         )
         _draw_star(d, (star_x0 + WIDTH) // 2, y0 + ROW_H // 2, STAR_SIZE, filled=task.focused)
 
-        meta = _meta_line(task, hide_project=group_by_project, hide_area=group_by_area)
+        # Only a task actually sitting under a group header (in_group) has
+        # its project/area already stated above it — the leading focused
+        # section is never in_group, even when the backlog beneath it is
+        # grouped, so its own rows keep showing project/area.
+        meta = _append_age_due(
+            _meta_line(
+                task, hide_project=group_by_project and in_group, hide_area=group_by_area and in_group
+            ),
+            task, now,
+        )
         title_y = y0 + (12 if meta else 20)
         title_text_row = _ellipsize(d, task.title, f.title, LIST_TEXT_RIGHT - TEXT_X)
         d.text((TEXT_X, title_y), title_text_row, font=f.title, fill=BLACK)
@@ -439,14 +690,18 @@ def render(
             )
         if i < len(visible) - 1 or needs_paging:
             # A heavier full-width rule marks where today's chosen work ends
-            # and the backlog filling the remaining rows begins — only
-            # meaningful in the default fetch order (see _organize_tasks).
+            # and the backlog filling the remaining rows begins. The next
+            # entry ends the leading focused section either by being a
+            # non-focused task (ungrouped backlog) or a header (grouped
+            # backlog starts right there) — either way, this is the edge.
             global_idx = page_start + i
             next_entry = entries[global_idx + 1] if global_idx + 1 < len(entries) else None
-            next_task = next_entry[1] if next_entry and next_entry[0] == "task" else None
+            next_still_focused = (
+                next_entry is not None and next_entry[0] == "task" and next_entry[1].focused
+            )
             boundary = (
-                allow_boundary and next_task is not None
-                and task.focused and not next_task.focused
+                allow_boundary and next_entry is not None
+                and task.focused and not next_still_focused
             )
             d.line(
                 [(MARGIN if boundary else TEXT_X, y1), (TEXT_RIGHT, y1)],
@@ -473,32 +728,24 @@ def render(
             label, font=f.title, fill=BLACK,
         )
 
-    # --- footer -----------------------------------------------------------
-    fy = HEIGHT - FOOTER_H
+    # --- footer -------------------------------------------------------------
+    # "updated HH:MM" now lives in the header (see above) — the footer has
+    # nothing routine left to say, so it collapses to a bare rule and gives
+    # that space back (footer_h computed above). It only expands back to
+    # full height for the one thing this app promises never to make easy to
+    # miss: a dead network showing a stale list with no explanation.
+    fy = HEIGHT - footer_h
     d.line([(MARGIN, fy), (TEXT_RIGHT, fy)], fill=BLACK)
-    left = "updated %s" % now.strftime("%H:%M")
-    # Pagination reaches everything actually fetched — "more" here means
-    # more than that: tasks the server reports but fetch()'s own limit
-    # never pulled down at all, so no amount of on-panel paging reaches them.
-    not_fetched = total - len(all_tasks)
-    if not_fetched > 0:
-        left += "   ·   %d more" % not_fetched
-    d.text((MARGIN, fy + 14), left, font=f.footer, fill=BLACK)
-
     if stale_since is not None:
-        # The image persists with the power off, so a dead network would
-        # otherwise show confidently wrong data forever. Say so on the glass.
         warn = "OFFLINE since %s" % stale_since.strftime("%H:%M")
-        d.text(
-            (TEXT_RIGHT - _text_width(d, warn, f.footer), fy + 14),
-            warn, font=f.footer, fill=BLACK,
-        )
+        d.text((MARGIN, fy + 14), warn, font=f.footer, fill=BLACK)
 
     return Rendered(image=img, hitboxes=hitboxes)
 
 
 def render_detail(
-    task: Task, completing: bool = False, expanded: bool = False, page: int = 0
+    task: Task, completing: bool = False, expanded: bool = False, page: int = 0,
+    now: Optional[datetime] = None,
 ) -> Rendered:
     """One task, full title, and its checklist if it has one.
 
@@ -515,6 +762,7 @@ def render_detail(
     silently dropped — the last row on a page becomes a "page X/Y" control
     (wrapping around) whenever there's more than one page.
     """
+    now = now or datetime.now()
     f = fonts()
     img = Image.new("1", (WIDTH, HEIGHT), WHITE)
     d = ImageDraw.Draw(img)
@@ -559,7 +807,7 @@ def render_detail(
 
     # --- meta + a one-line description snippet -----------------------------
     y = title_row_bottom + 4
-    meta = _meta_line(task)
+    meta = _append_age_due(_meta_line(task), task, now)
     if meta:
         d.text((TEXT_X, y), _ellipsize(d, meta, f.meta, TEXT_RIGHT - TEXT_X), font=f.meta, fill=BLACK)
         y += 24

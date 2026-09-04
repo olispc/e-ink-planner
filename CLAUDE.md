@@ -68,20 +68,50 @@ page, so it still lands correctly when the split falls right at a page edge.
 **The header holds real controls, not just a title.** Tapping the view title
 is "home" (list page back to 0 — the toggles below are deliberately left
 alone, since a stray tap on the title shouldn't undo a view you set up on
-purpose). Sort (newest/oldest by `created_at`) and area/project grouping live
-in a fixed-position cluster at header-center, anchored there rather than
-relative to the (variable-width) title or date text so neither can ever
-collide with it. Sort is a real tri-state — `None` (default fetch order,
-heavy rule intact) / `True` / `False` — reached with two arrow buttons, not
-three: tapping the *already-active* arrow clears back to `None`, since
-"home" won't do it and a control with no way back to default is a dead end.
-`_organize_tasks()` (layout.py) turns the flat fetched list into a stream of
-task/header entries per these toggles; `_paginate()` bin-packs that stream by
-real height (a group header is half a task row) rather than a fixed row
-count, so paging still works when rows aren't all the same size. Grouping
-sets `allow_boundary = False` — the focused/backlog heavy rule is a property
-of the *default* order and doesn't have a coherent meaning once sort or
-grouping has overridden it.
+purpose). Five toggles live in a fixed-position cluster at header-center,
+anchored there rather than relative to the (variable-width) title or date
+text so neither can ever collide with it:
+- **focus-sticky** (star) — whether starred-today tasks pin to the top ahead
+  of sort order. On by default; it's its own toggle because starring is a
+  stronger signal than creation date, but sometimes you want a pure
+  chronological view instead.
+- **sort direction** (single arrow, up=newest/down=oldest by `created_at`) —
+  one button, not two: with focus-sticky handling "important first"
+  separately, there's no third state a bare sort control needs to reach, so
+  a tap just flips it.
+- **area / project grouping** (two small bordered boxes, heavier border when
+  on) — combine rather than nest: when both are on, `_organize_tasks()`
+  emits one "Area / Project" header line instead of two levels, since a page
+  rarely holds more than one project under the same area anyway. The area
+  icon is a custom stacked-layers glyph (Mindwtr areas carry a user-chosen
+  emoji, not a fixed icon, so there's nothing to "match"); the project icon
+  is a folder, matching Lucide's `Folder` used by Mindwtr's own desktop app.
+- **due-date-first** (calendar icon) — pulls tasks with a `dueDate` to the
+  top of whatever list or group they're in, soonest due first, ahead of the
+  usual sort direction. Scoped to "the non-starred list" by construction:
+  `_sort_backlog()` is what due-first changes, and the focus-sticky leading
+  section always sorts through plain `_sort_by_date` instead, so a starred
+  task never gets bumped by an unstarred one with a nearer due date.
+
+**Focus-sticky always wins when it's on** — starred-today tasks form their
+own flat leading section, sorted by `sort_newest` but never bucketed by
+area/project even when grouping is also on: starring is a stronger signal
+than either. Sort direction and grouping apply only to the backlog beneath
+the heavy rule. A page with nothing starred today has no leading section and
+no rule, same as with focus-sticky off. `_organize_tasks()` (layout.py) turns
+the flat fetched list into a stream of task/header entries per these
+toggles, tagging each task `in_group` so its row knows whether a header
+above it already states its project/area (the leading section never is,
+even when the backlog under it is grouped — those rows keep their own
+project/area visible). `_paginate()` bin-packs that stream by real height (a
+group header is half a task row) rather than a fixed row count, so paging
+still works when rows aren't all the same size.
+
+**Header status text is not a 5th control.** "updated HH:MM" plus a small
+sync glyph sits next to the date on the right — deliberately smaller (footer
+font, a 12px icon vs. the controls' 20px) and grouped with the read-only
+date/count instead of the tappable cluster, so it reads as status, not
+another toggle.
 
 **Checklist writes are whole-array, not per-item.** Mindwtr's schema (verified
 against `packages/core/src/task-sync-schema.ts`) has no per-item toggle route
@@ -110,7 +140,19 @@ gets done. Don't add Pi-only imports at module scope.
 documents which routes and query params were read off
 `apps/cloud/src/server.ts`. If something looks wrong, re-read it there rather
 than probing blind — and remember a task inside a project reports no `areaId`
-of its own.
+of its own. `dueDate` (confirmed against `task-sync-schema.ts` and live data)
+is an optional string that's sometimes a bare `YYYY-MM-DD` and sometimes a
+full ISO timestamp — `_parse_iso()` already handles both, same as
+`createdAt`.
+
+**A task's meta line carries more than project/area/contexts — on the list
+view too, not just detail.** `_append_age_due()` (layout.py) appends a
+relative "added N ago" (from `created_at`) and, if the task has one, "due in
+N" / "overdue N" (from `due_date`) to that same row rather than spending a
+new one — shared by both `render()`'s row loop and `render_detail()`, so a
+task reads the same age/due info wherever it appears. `_relative_age()` /
+`_format_due()` both work on calendar-day difference so "added yesterday"
+doesn't depend on time-of-day.
 
 ## Where the detail lives
 

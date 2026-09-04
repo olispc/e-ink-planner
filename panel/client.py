@@ -73,6 +73,7 @@ class Task:
     contexts: List[str]
     focused: bool
     created_at: Optional[datetime]
+    due_date: Optional[datetime]
     description: Optional[str]
     checklist: List[ChecklistItem]
 
@@ -192,6 +193,11 @@ class MindwtrClient:
                     contexts=list(t.get("contexts") or []),
                     focused=bool(t.get("isFocusedToday")),
                     created_at=_parse_iso(t.get("createdAt")),
+                    # dueDate is sometimes a bare "YYYY-MM-DD" (no time
+                    # component) rather than a full timestamp — _parse_iso
+                    # already handles that via fromisoformat's own support
+                    # for date-only strings, same helper as createdAt.
+                    due_date=_parse_iso(t.get("dueDate")),
                     description=t.get("description") or None,
                     checklist=[
                         ChecklistItem(

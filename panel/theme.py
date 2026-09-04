@@ -51,17 +51,26 @@ LIST_TEXT_RIGHT = TEXT_RIGHT - STAR_ZONE_W  # title/meta ellipsis width in rende
 # competing for a fixed corner.
 DETAIL_STAR_ZONE_W = 56
 
-# List-view header controls: home (tap the view title), sort direction
-# (newest/oldest by created date), and area/project grouping. All fit in
-# the existing single header row — no extra height taken from the 6 body
-# rows, which are already scarce.
-SORT_ARROW_ACTIVE = 22        # the current direction draws bigger...
-SORT_ARROW_INACTIVE = 14      # ...the other one smaller, per spec
-GROUP_TOGGLE_BOX = 28         # small "P"/"A" boxes, heavier border when on
+# List-view header controls: home (tap the view title), a focus-sticky
+# toggle, sort direction (newest/oldest by created date), and area/project
+# grouping. All fit in the existing single header row — no extra height
+# taken from the 6 body rows, which are already scarce.
+FOCUS_STAR_SIZE = 20           # header-scale — smaller than a row's own star
+SORT_ARROW_SIZE = 20           # one button, shows whichever direction is on
+GROUP_TOGGLE_BOX = 28          # small icon boxes, heavier border when on
+GROUP_ICON_SIZE = 16           # the folder/layers icon drawn inside those
+SYNC_ICON_SIZE = 12            # deliberately smaller than the 20px controls —
+                               # "updated HH:MM" is status, not a 5th toggle
 
 # A group divider (area or project name) is half a task row — organizational
 # text, not a tappable item, so it doesn't need a task row's full height.
 GROUP_HEADER_H = ROW_H // 2
+
+# The footer collapses to a bare rule when there's nothing it needs to say —
+# "updated HH:MM" lives in the header instead (see render()) — but keeps its
+# full height for the OFFLINE warning, which is the one thing this app
+# promises never to make hard to notice.
+COLLAPSED_FOOTER_H = 10
 
 BLACK, WHITE = 0, 1           # mode "1" pixel values
 

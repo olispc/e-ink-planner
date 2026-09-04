@@ -17,7 +17,7 @@ from panel.config import Config  # noqa: E402
 def task(n: int, **kw) -> Task:
     defaults = dict(
         id="task-%d" % n, title="Task %d" % n, project=None, area=None,
-        contexts=[], focused=False, created_at=None, description=None, checklist=[],
+        contexts=[], focused=False, created_at=None, due_date=None, description=None, checklist=[],
     )
     defaults.update(kw)
     return Task(**defaults)
@@ -220,35 +220,27 @@ class TestHeaderControls(unittest.TestCase):
         box = next(b for b in panel.hitboxes if b.kind == kind)
         panel.handle_tap((box.x0 + 5, box.y0 + 5))
 
-    def test_sort_newest_sets_mode_then_clears_on_second_tap(self):
+    def test_sort_toggle_flips_direction_each_tap(self):
         panel = make_panel([task(1)])
         panel.refresh()
         panel.draw(force=True)
+        self.assertFalse(panel.sort_newest)  # oldest-first by default
 
-        self._tap(panel, "sort_newest")
-        self.assertIs(panel.sort_mode, True)
-        self._tap(panel, "sort_newest")
-        self.assertIsNone(panel.sort_mode)
+        self._tap(panel, "sort_toggle")
+        self.assertTrue(panel.sort_newest)
+        self._tap(panel, "sort_toggle")
+        self.assertFalse(panel.sort_newest)
 
-    def test_sort_oldest_sets_mode_then_clears_on_second_tap(self):
+    def test_focus_sticky_toggle_flips_each_tap(self):
         panel = make_panel([task(1)])
         panel.refresh()
         panel.draw(force=True)
+        self.assertTrue(panel.focus_sticky)  # on by default
 
-        self._tap(panel, "sort_oldest")
-        self.assertIs(panel.sort_mode, False)
-        self._tap(panel, "sort_oldest")
-        self.assertIsNone(panel.sort_mode)
-
-    def test_switching_sort_direction_replaces_rather_than_toggles_off(self):
-        panel = make_panel([task(1)])
-        panel.refresh()
-        panel.draw(force=True)
-
-        self._tap(panel, "sort_newest")
-        self.assertIs(panel.sort_mode, True)
-        self._tap(panel, "sort_oldest")
-        self.assertIs(panel.sort_mode, False)
+        self._tap(panel, "focus_sticky")
+        self.assertFalse(panel.focus_sticky)
+        self._tap(panel, "focus_sticky")
+        self.assertTrue(panel.focus_sticky)
 
     def test_project_and_area_view_toggle_independently_and_combine(self):
         panel = make_panel([task(1)])
@@ -267,6 +259,17 @@ class TestHeaderControls(unittest.TestCase):
         self.assertFalse(panel.group_by_project)
         self.assertTrue(panel.group_by_area)
 
+    def test_due_first_toggle_flips_each_tap(self):
+        panel = make_panel([task(1)])
+        panel.refresh()
+        panel.draw(force=True)
+        self.assertFalse(panel.due_first)  # off by default
+
+        self._tap(panel, "toggle_due_first")
+        self.assertTrue(panel.due_first)
+        self._tap(panel, "toggle_due_first")
+        self.assertFalse(panel.due_first)
+
     def test_toggling_a_view_control_resets_the_page(self):
         panel = make_panel([task(i) for i in range(25)])
         panel.refresh()
@@ -283,7 +286,7 @@ class TestHeaderControls(unittest.TestCase):
         panel = make_panel([task(i) for i in range(25)])
         panel.refresh()
         panel.draw(force=True)
-        self._tap(panel, "sort_newest")
+        self._tap(panel, "sort_toggle")
         self._tap(panel, "toggle_area_view")
         pagers = [b for b in panel.hitboxes if b.kind == "list_page"]
         forward = max(pagers, key=lambda b: b.x0)
@@ -292,7 +295,7 @@ class TestHeaderControls(unittest.TestCase):
 
         self._tap(panel, "home")
         self.assertEqual(panel.list_page, 0)
-        self.assertIs(panel.sort_mode, True)
+        self.assertTrue(panel.sort_newest)
         self.assertTrue(panel.group_by_area)
 
 

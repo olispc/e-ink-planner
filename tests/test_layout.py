@@ -3,15 +3,17 @@ from __future__ import annotations
 
 import sys
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from panel.client import ChecklistItem, Task  # noqa: E402
-from panel.layout import _organize_tasks, hit, render, render_detail  # noqa: E402
+from panel.layout import (  # noqa: E402
+    _format_due, _organize_tasks, _relative_age, hit, render, render_detail,
+)
 from panel.theme import (  # noqa: E402
-    HEADER_H, HEIGHT, ROW_H, ROWS, STAR_ZONE_W, TEXT_RIGHT, TEXT_X, WIDTH,
+    BLACK, HEADER_H, HEIGHT, MARGIN, ROW_H, ROWS, STAR_ZONE_W, TEXT_RIGHT, TEXT_X, WHITE, WIDTH,
 )
 
 
@@ -24,6 +26,7 @@ def task(n: int, title: str = None, checklist=None, **kw) -> Task:
         contexts=kw.get("contexts", []),
         focused=kw.get("focused", False),
         created_at=kw.get("created_at"),
+        due_date=kw.get("due_date"),
         description=kw.get("description"),
         checklist=checklist or [],
     )
@@ -33,10 +36,14 @@ def item(n: int, completed: bool = False, title: str = None) -> ChecklistItem:
     return ChecklistItem(id="item-%d" % n, title=title or "Item %d" % n, completed=completed)
 
 
-# The header's own controls (home, sort direction, area/project toggles) are
-# always present regardless of task content — real, static hitboxes, not
-# something tests should mistake for "the header has nothing tappable".
-HEADER_CONTROL_KINDS = {"home", "sort_newest", "sort_oldest", "toggle_project_view", "toggle_area_view"}
+# The header's own controls (home, focus-sticky, sort direction, area/
+# project/due toggles) are always present regardless of task content — real,
+# static hitboxes, not something tests should mistake for "the header has
+# nothing tappable".
+HEADER_CONTROL_KINDS = {
+    "home", "focus_sticky", "sort_toggle", "toggle_project_view", "toggle_area_view",
+    "toggle_due_first",
+}
 
 
 def _non_header_hitboxes(hitboxes):
@@ -53,6 +60,18 @@ class TestRender(unittest.TestCase):
         rendered = render([task(i) for i in range(ROWS)], "next")
         # Three hitboxes (checkbox / text / star) per visible row, no pager.
         self.assertEqual(len(_non_header_hitboxes(rendered.hitboxes)), ROWS * 3)
+
+    def test_list_row_shows_relative_age(self):
+        now = datetime(2026, 1, 30)
+        with_age = render([task(1, created_at=now - timedelta(days=16))], "next", now=now).image
+        without = render([task(1)], "next", now=now).image
+        self.assertNotEqual(with_age.tobytes(), without.tobytes())
+
+    def test_list_row_shows_due_date(self):
+        now = datetime(2026, 1, 30)
+        with_due = render([task(1, due_date=now + timedelta(days=2))], "next", now=now).image
+        without = render([task(1)], "next", now=now).image
+        self.assertNotEqual(with_due.tobytes(), without.tobytes())
 
     def test_header_controls_are_always_present(self):
         rendered = render([task(i) for i in range(ROWS)], "next")
@@ -92,6 +111,45 @@ class TestFocusRendering(unittest.TestCase):
         two = render([task(0, focused=True), task(1, focused=True)]
                      + [task(i) for i in range(2, 9)], "focus")
         self.assertNotEqual(one.image.tobytes(), two.image.tobytes())
+
+    def test_boundary_rule_appears_before_a_group_header_too(self):
+        # Old bug: the heavy rule only fired when the next entry was another
+        # task, so a focused task immediately followed by the first group
+        # header of the backlog (exactly this case) drew no boundary at all.
+        tasks = [task(0, project="Alpha", focused=True), task(1, project="Beta")]
+        rendered = render(tasks, "focus", group_by_project=True)
+        y1 = HEADER_H + ROW_H
+        # The heavy rule reaches all the way to MARGIN; an ordinary row
+        # separator only starts at TEXT_X, so a black pixel this far left
+        # is only possible if the full-width boundary line was drawn here.
+        self.assertEqual(rendered.image.getpixel((MARGIN + 2, y1 + 1)), BLACK)
+
+    def test_no_boundary_when_focus_sticky_is_off_even_with_grouping(self):
+        tasks = [task(0, project="Alpha", focused=True), task(1, project="Beta")]
+        rendered = render(tasks, "focus", group_by_project=True, focus_sticky=False)
+        y1 = HEADER_H + ROW_H
+        self.assertEqual(rendered.image.getpixel((MARGIN + 2, y1 + 1)), WHITE)
+
+    def test_grouped_backlog_row_hides_project_but_leading_focused_row_does_not(self):
+        # The leading focused-section row has no group header above it, so
+        # its meta line must still show the project; a backlog row sitting
+        # under "Alpha" doesn't need to repeat it.
+        tasks = [
+            task(0, project="Alpha", focused=True, title="Focused one"),
+            task(1, project="Alpha", title="Backlog one"),
+        ]
+        rendered = render(tasks, "focus", group_by_project=True)
+        # Render without grouping as a control: the focused row's meta line
+        # (containing "Alpha") should render identically whether or not
+        # project grouping is toggled on, since it's never in_group.
+        ungrouped = render(tasks, "focus", group_by_project=False)
+        # Crop just the focused row (row 0) from each and compare — the
+        # grouped backlog row's differing "hide project" state lives below
+        # this crop and mustn't be the reason for any difference here.
+        row0_h = ROW_H
+        grouped_row0 = rendered.image.crop((0, HEADER_H, WIDTH, HEADER_H + row0_h))
+        plain_row0 = ungrouped.image.crop((0, HEADER_H, WIDTH, HEADER_H + row0_h))
+        self.assertEqual(grouped_row0.tobytes(), plain_row0.tobytes())
 
 
 class TestListHitTesting(unittest.TestCase):
@@ -195,54 +253,224 @@ def _dt(n: int) -> datetime:
 
 
 class TestOrganizeTasks(unittest.TestCase):
-    def test_default_sort_mode_preserves_fetch_order_and_allows_boundary(self):
-        tasks = [task(0, focused=True), task(1), task(2)]
-        entries, allow_boundary = _organize_tasks(tasks, None, False, False)
-        self.assertEqual([e[1].id for e in entries], ["task-0", "task-1", "task-2"])
+    def test_focus_sticky_wins_over_sort_direction(self):
+        # Oldest-first sort, but the focused task (created most recently of
+        # the two) still leads — starring is a stronger signal than age.
+        tasks = [task(0, created_at=_dt(1)), task(1, focused=True, created_at=_dt(3))]
+        entries, allow_boundary = _organize_tasks(tasks, False, True, False, False)
+        self.assertEqual([e[1].id for e in entries], ["task-1", "task-0"])
         self.assertTrue(allow_boundary)
+
+    def test_focus_sticky_off_lets_sort_interleave_focused_and_not(self):
+        tasks = [task(0, focused=True, created_at=_dt(1)), task(1, created_at=_dt(3))]
+        entries, allow_boundary = _organize_tasks(tasks, True, False, False, False)
+        self.assertEqual([e[1].id for e in entries], ["task-1", "task-0"])  # pure date order
+        self.assertFalse(allow_boundary)
 
     def test_newest_first_sorts_by_created_date_descending(self):
         tasks = [task(0, created_at=_dt(1)), task(1, created_at=_dt(3)), task(2, created_at=_dt(2))]
-        entries, allow_boundary = _organize_tasks(tasks, True, False, False)
+        entries, _ = _organize_tasks(tasks, True, False, False, False)
         self.assertEqual([e[1].id for e in entries], ["task-1", "task-2", "task-0"])
-        self.assertFalse(allow_boundary)
 
     def test_oldest_first_sorts_ascending(self):
         tasks = [task(0, created_at=_dt(1)), task(1, created_at=_dt(3)), task(2, created_at=_dt(2))]
-        entries, _ = _organize_tasks(tasks, False, False, False)
+        entries, _ = _organize_tasks(tasks, False, False, False, False)
         self.assertEqual([e[1].id for e in entries], ["task-0", "task-2", "task-1"])
 
     def test_missing_created_at_sorts_to_the_oldest_end(self):
         tasks = [task(0, created_at=_dt(1)), task(1, created_at=None)]
-        newest_first, _ = _organize_tasks(tasks, True, False, False)
+        newest_first, _ = _organize_tasks(tasks, True, False, False, False)
         self.assertEqual(newest_first[-1][1].id, "task-1")
 
     def test_project_grouping_buckets_with_a_fallback_for_unfiled_tasks(self):
         tasks = [task(0, project="Alpha"), task(1, project=None), task(2, project="Alpha")]
-        entries, allow_boundary = _organize_tasks(tasks, None, False, True)
+        entries, allow_boundary = _organize_tasks(tasks, False, True, False, True)
         kinds_and_labels = [(e[0], e[1] if e[0] == "header" else e[1].id) for e in entries]
         self.assertEqual(
             kinds_and_labels,
             [("header", "Alpha"), ("task", "task-0"), ("task", "task-2"),
              ("header", "No project"), ("task", "task-1")],
         )
-        self.assertFalse(allow_boundary)
+        self.assertTrue(allow_boundary)  # reflects focus_sticky, not grouping
 
-    def test_area_and_project_nest_area_outer_project_inner(self):
-        tasks = [task(0, area="Digital", project="Alpha"), task(1, area="Digital", project="Beta")]
-        entries, _ = _organize_tasks(tasks, None, True, True)
-        levels = [(e[0], e[2] if e[0] == "header" else None) for e in entries]
-        self.assertEqual(
-            levels,
-            [("header", 0), ("header", 1), ("task", None), ("header", 1), ("task", None)],
-        )
+    def test_project_header_carries_the_project_icon(self):
+        entries, _ = _organize_tasks([task(0, project="Alpha")], False, True, False, True)
+        self.assertEqual(entries[0], ("header", "Alpha", "project"))
+
+    def test_newest_first_orders_project_headers_by_each_projects_newest_task(self):
+        # Alpha's tasks are both older than Beta's — newest-first should put
+        # Beta's header first, using each project's own newest task as its
+        # ordering key, not whichever task happened to be fetched first.
+        tasks = [
+            task(0, project="Alpha", created_at=_dt(1)),
+            task(1, project="Alpha", created_at=_dt(2)),
+            task(2, project="Beta", created_at=_dt(3)),
+            task(3, project="Beta", created_at=_dt(4)),
+        ]
+        entries, _ = _organize_tasks(tasks, True, False, False, True)
+        headers = [e[1] for e in entries if e[0] == "header"]
+        self.assertEqual(headers, ["Beta", "Alpha"])
+
+    def test_oldest_first_orders_project_headers_by_each_projects_oldest_task(self):
+        # Same tasks, opposite toggle: oldest-first orders by each project's
+        # own oldest task, which flips Alpha back in front of Beta.
+        tasks = [
+            task(0, project="Alpha", created_at=_dt(1)),
+            task(1, project="Alpha", created_at=_dt(2)),
+            task(2, project="Beta", created_at=_dt(3)),
+            task(3, project="Beta", created_at=_dt(4)),
+        ]
+        entries, _ = _organize_tasks(tasks, False, False, False, True)
+        headers = [e[1] for e in entries if e[0] == "header"]
+        self.assertEqual(headers, ["Alpha", "Beta"])
+
+    def test_no_project_sorts_last_regardless_of_sort_direction(self):
+        # "No project" isn't a real project with a meaningful recency — its
+        # task here is the newest of the three, which would otherwise put it
+        # first under newest-first and split up the real groups around it.
+        tasks = [
+            task(0, project="Alpha", created_at=_dt(1)),
+            task(1, project=None, created_at=_dt(5)),
+            task(2, project="Beta", created_at=_dt(3)),
+        ]
+        newest, _ = _organize_tasks(tasks, True, False, False, True)
+        oldest, _ = _organize_tasks(tasks, False, False, False, True)
+        self.assertEqual([e[1] for e in newest if e[0] == "header"], ["Beta", "Alpha", "No project"])
+        self.assertEqual([e[1] for e in oldest if e[0] == "header"], ["Alpha", "Beta", "No project"])
+
+    def test_no_area_sorts_last_regardless_of_sort_direction(self):
+        tasks = [
+            task(0, area="Digital", created_at=_dt(1)),
+            task(1, area=None, created_at=_dt(5)),
+            task(2, area="Music", created_at=_dt(3)),
+        ]
+        newest, _ = _organize_tasks(tasks, True, False, True, False)
+        headers = [e[1] for e in newest if e[0] == "header"]
+        self.assertEqual(headers, ["Music", "Digital", "No area"])
 
     def test_area_grouping_alone_ignores_project(self):
         tasks = [task(0, area="Digital", project="Alpha"), task(1, area="Digital", project="Beta")]
-        entries, _ = _organize_tasks(tasks, None, True, False)
+        entries, _ = _organize_tasks(tasks, False, True, True, False)
         # One area header, then both tasks directly underneath — no project
         # sub-headers since group_by_project is off.
         self.assertEqual([e[0] for e in entries], ["header", "task", "task"])
+        self.assertEqual(entries[0][2], "area")
+
+    def test_area_and_project_combine_into_one_header_line_not_nested(self):
+        tasks = [task(0, area="Digital", project="Alpha"), task(1, area="Digital", project="Beta")]
+        entries, _ = _organize_tasks(tasks, False, True, True, True)
+        headers = [e for e in entries if e[0] == "header"]
+        self.assertEqual([h[1] for h in headers], ["Digital / Alpha", "Digital / Beta"])
+        self.assertTrue(all(h[2] == "both" for h in headers))
+
+    def test_area_without_a_project_does_not_say_no_project(self):
+        entries, _ = _organize_tasks(
+            [task(0, area="Digital", project=None)], False, True, True, True
+        )
+        header = next(e for e in entries if e[0] == "header")
+        self.assertEqual(header[1], "Digital")
+
+    def test_focus_sticky_pulls_focused_tasks_out_of_grouping_into_their_own_section(self):
+        # Two focused tasks in different projects still lead together, flat,
+        # with no header of their own — grouping only takes effect once the
+        # backlog starts underneath them.
+        tasks = [
+            task(0, project="Alpha", focused=True, created_at=_dt(1)),
+            task(1, project="Alpha", created_at=_dt(2)),
+            task(2, project="Beta", focused=True, created_at=_dt(3)),
+            task(3, project="Beta", created_at=_dt(4)),
+        ]
+        entries, allow_boundary = _organize_tasks(tasks, False, True, False, True)
+        self.assertEqual(
+            entries,
+            [
+                ("task", tasks[0], False),
+                ("task", tasks[2], False),
+                ("header", "Alpha", "project"),
+                ("task", tasks[1], True),
+                ("header", "Beta", "project"),
+                ("task", tasks[3], True),
+            ],
+        )
+        self.assertTrue(allow_boundary)
+
+    def test_focus_sticky_off_lets_grouping_bucket_everything_including_focused(self):
+        # With the sticky section off, a focused task is just a task —
+        # grouping buckets it by project like any other, no leading section.
+        tasks = [task(0, project="Alpha", focused=True), task(1, project="Beta")]
+        entries, allow_boundary = _organize_tasks(tasks, False, False, False, True)
+        self.assertEqual([e[0] for e in entries], ["header", "task", "header", "task"])
+        self.assertTrue(all(e[2] for e in entries if e[0] == "task"))
+        self.assertFalse(allow_boundary)
+
+    def test_no_focused_tasks_means_no_leading_section_even_with_sticky_on(self):
+        tasks = [task(0, project="Alpha"), task(1, project="Beta")]
+        entries, _ = _organize_tasks(tasks, False, True, False, True)
+        self.assertEqual([e[0] for e in entries], ["header", "task", "header", "task"])
+
+    def test_due_first_pulls_due_dated_backlog_tasks_to_the_top_soonest_first(self):
+        tasks = [
+            task(0, created_at=_dt(1)),
+            task(1, created_at=_dt(2), due_date=_dt(10)),
+            task(2, created_at=_dt(3), due_date=_dt(5)),
+        ]
+        entries, _ = _organize_tasks(tasks, False, False, False, False, due_first=True)
+        # Soonest due date leads regardless of created_at/sort_newest; the
+        # one task with no due date falls back to plain sort_newest order.
+        self.assertEqual([e[1].id for e in entries], ["task-2", "task-1", "task-0"])
+
+    def test_due_first_never_reorders_the_focused_leading_section(self):
+        # "Non-starred list" means exactly that: a focused task with no due
+        # date still leads, ahead of a backlog task that has one.
+        tasks = [
+            task(0, focused=True, created_at=_dt(1)),
+            task(1, created_at=_dt(2), due_date=_dt(3)),
+        ]
+        entries, _ = _organize_tasks(tasks, False, True, False, False, due_first=True)
+        self.assertEqual([e[1].id for e in entries], ["task-0", "task-1"])
+
+    def test_due_first_applies_within_each_group_not_across_groups(self):
+        tasks = [
+            task(0, project="Alpha", created_at=_dt(1)),
+            task(1, project="Alpha", created_at=_dt(2), due_date=_dt(9)),
+            task(2, project="Beta", created_at=_dt(3)),
+        ]
+        entries, _ = _organize_tasks(tasks, False, False, False, True, due_first=True)
+        # Group header order is untouched by due_first (still sort_newest,
+        # oldest-first here); within Alpha, the due-dated task leads.
+        self.assertEqual(
+            [(e[0], e[1] if e[0] == "header" else e[1].id) for e in entries],
+            [("header", "Alpha"), ("task", "task-1"), ("task", "task-0"), ("header", "Beta"), ("task", "task-2")],
+        )
+
+    def test_due_first_off_ignores_due_dates_entirely(self):
+        tasks = [
+            task(0, created_at=_dt(1)),
+            task(1, created_at=_dt(2), due_date=_dt(3)),
+        ]
+        entries, _ = _organize_tasks(tasks, False, False, False, False, due_first=False)
+        self.assertEqual([e[1].id for e in entries], ["task-0", "task-1"])
+
+
+class TestRelativeAgeAndDueFormatting(unittest.TestCase):
+    def test_relative_age_buckets(self):
+        now = datetime(2026, 1, 30)
+        self.assertEqual(_relative_age(now, now), "added today")
+        self.assertEqual(_relative_age(now - timedelta(days=1), now), "added yesterday")
+        self.assertEqual(_relative_age(now - timedelta(days=5), now), "added 5d ago")
+        self.assertEqual(_relative_age(now - timedelta(days=14), now), "added 2w ago")
+        self.assertEqual(_relative_age(now - timedelta(days=365), now), "added 12mo ago")
+        self.assertEqual(_relative_age(now - timedelta(days=365 * 6), now), "added 6y ago")
+
+    def test_format_due_buckets(self):
+        now = datetime(2026, 1, 30)
+        self.assertEqual(_format_due(now - timedelta(days=10), now), "overdue 10d")
+        self.assertEqual(_format_due(now - timedelta(days=1), now), "overdue 1d")
+        self.assertEqual(_format_due(now, now), "due today")
+        self.assertEqual(_format_due(now + timedelta(days=1), now), "due tomorrow")
+        self.assertEqual(_format_due(now + timedelta(days=4), now), "due in 4d")
+        far = now + timedelta(days=30)
+        self.assertEqual(_format_due(far, now), "due %s" % far.strftime("%-d %b"))
 
 
 class TestDetailRendering(unittest.TestCase):
@@ -253,6 +481,18 @@ class TestDetailRendering(unittest.TestCase):
 
     def test_long_title_wraps_rather_than_overflows(self):
         render_detail(task(1, "x " * 60))
+
+    def test_created_at_shows_relative_age_on_the_meta_row(self):
+        now = _dt(30)
+        with_age = render_detail(task(1, created_at=_dt(20)), now=now).image
+        without = render_detail(task(1), now=now).image
+        self.assertNotEqual(with_age.tobytes(), without.tobytes())
+
+    def test_due_date_shows_on_the_meta_row(self):
+        now = datetime(2026, 1, 30)
+        with_due = render_detail(task(1, due_date=now + timedelta(days=5)), now=now).image
+        without = render_detail(task(1), now=now).image
+        self.assertNotEqual(with_due.tobytes(), without.tobytes())
 
     def test_unchecked_items_render_before_done_ones(self):
         # Order sent in: done, done, unchecked. The render should put the

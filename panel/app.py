@@ -52,14 +52,19 @@ class Panel:
         # Which page of the list view is showing — clamped, not reset, by
         # render() itself when the list shrinks, same as checklist_page.
         self.list_page: int = 0
-        # None = default fetch order (focused-first, heavy rule intact);
-        # True/False = sorted by created date, newest/oldest first. Tapping
-        # the already-active sort arrow clears back to None — the only way
-        # back to the default order, since "home" deliberately leaves these
-        # toggles alone (see handle_tap's "home" case).
-        self.sort_mode: Optional[bool] = None
+        # Sorted by created date, oldest-first by default; the single sort
+        # button flips this. Focused-today tasks win over sort order
+        # whenever focus_sticky is on (the default) — starring something is
+        # a stronger signal than when it was created. "home" deliberately
+        # leaves all three of these alone (see handle_tap's "home" case).
+        self.sort_newest: bool = False
+        self.focus_sticky: bool = True
         self.group_by_area: bool = False
         self.group_by_project: bool = False
+        # Pushes due-dated backlog tasks to the top of their list/group,
+        # soonest due first — never touches the focus-sticky leading
+        # section, which stays exempt as "the starred list" regardless.
+        self.due_first: bool = False
         self._last_signature: Optional[tuple] = None
         self._last_etag: Optional[str] = None
 
@@ -95,8 +100,8 @@ class Panel:
             return ("detail", task, self.checklist_expanded, self.checklist_page)
         return (
             "list", tuple(self.tasks), self.list_page,
-            self.sort_mode, self.group_by_area, self.group_by_project,
-            self.stale_since is not None,
+            self.sort_newest, self.focus_sticky, self.group_by_area, self.group_by_project,
+            self.due_first, self.stale_since is not None,
         )
 
     # -- output -----------------------------------------------------------
@@ -122,9 +127,11 @@ class Panel:
                 total=len(self.tasks),
                 stale_since=self.stale_since,
                 page=self.list_page,
-                sort_mode=self.sort_mode,
+                sort_newest=self.sort_newest,
+                focus_sticky=self.focus_sticky,
                 group_by_area=self.group_by_area,
                 group_by_project=self.group_by_project,
+                due_first=self.due_first,
             )
         if partial:
             self.display.show_partial(rendered.image)
@@ -166,12 +173,12 @@ class Panel:
         elif box.kind == "home":
             self.list_page = 0
             self.draw(force=True, partial=True)
-        elif box.kind == "sort_newest":
-            self.sort_mode = None if self.sort_mode is True else True
+        elif box.kind == "sort_toggle":
+            self.sort_newest = not self.sort_newest
             self.list_page = 0
             self.draw(force=True, partial=True)
-        elif box.kind == "sort_oldest":
-            self.sort_mode = None if self.sort_mode is False else False
+        elif box.kind == "focus_sticky":
+            self.focus_sticky = not self.focus_sticky
             self.list_page = 0
             self.draw(force=True, partial=True)
         elif box.kind == "toggle_project_view":
@@ -180,6 +187,10 @@ class Panel:
             self.draw(force=True, partial=True)
         elif box.kind == "toggle_area_view":
             self.group_by_area = not self.group_by_area
+            self.list_page = 0
+            self.draw(force=True, partial=True)
+        elif box.kind == "toggle_due_first":
+            self.due_first = not self.due_first
             self.list_page = 0
             self.draw(force=True, partial=True)
 
@@ -221,8 +232,9 @@ class Panel:
             rendered = render(
                 self.tasks, self.config.view, total=len(self.tasks),
                 stale_since=self.stale_since, completing=task.id, page=self.list_page,
-                sort_mode=self.sort_mode, group_by_area=self.group_by_area,
-                group_by_project=self.group_by_project,
+                sort_newest=self.sort_newest, focus_sticky=self.focus_sticky,
+                group_by_area=self.group_by_area, group_by_project=self.group_by_project,
+                due_first=self.due_first,
             )
         self.display.show_partial(rendered.image)
         self.hitboxes = rendered.hitboxes

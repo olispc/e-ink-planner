@@ -35,6 +35,7 @@ def from_fixture(path: Path):
             contexts=t.get("contexts", []),
             focused=t.get("focused", False),
             created_at=_parse_iso(t.get("createdAt")),
+            due_date=_parse_iso(t.get("dueDate")),
             description=t.get("description"),
             checklist=[
                 ChecklistItem(id=c["id"], title=c["title"], completed=c.get("completed", False))
