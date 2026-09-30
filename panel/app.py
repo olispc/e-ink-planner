@@ -3,11 +3,11 @@
 Redraw discipline is the design constraint. A full refresh is ~1.5s; the
 vendored driver also does flicker-free partial refresh (confirmed against
 Waveshare's epd7in5_V2 source and demo — see display.py), but repeated
-partial updates build up visible ghosting, so it isn't used unconditionally.
-The split: a poll tick always does a full refresh, because it's not
-latency-sensitive and content can change anywhere on screen. A tap is
-latency-sensitive — that's the finger waiting — so navigation and optimistic
-updates go through partial refresh, capped by EPaperDisplay itself.
+partial updates build up visible ghosting. The split: every update — taps,
+their reconciles, background changes, poll ticks — is partial, so the panel
+never flashes while something is happening. The full refresh that clears the
+ghosting runs only at startup and when EPaperDisplay.cleanup_due() says
+enough residue has built up *and* the panel has been idle a while.
 """
 from __future__ import annotations
 
@@ -33,11 +33,6 @@ FETCH_LIMIT = 500
 # disappears and the list reflows. Two static frames, not motion — see the
 # module docstring — so this is a deliberate pause, not a frame duration.
 CONFIRM_SECONDS = 0.45
-
-# How long after the last tap before a full refresh clears partial-update
-# ghosting. Long enough that a run of ticks never gets interrupted by the
-# ~1.5s black/white flash; short enough the residue doesn't sit there all day.
-IDLE_CLEAN_SECONDS = 60
 
 
 class Panel:
@@ -337,7 +332,6 @@ class Panel:
         self.refresh()
         self.draw(force=True)
         self._last_etag = self._peek_etag()
-        last_tap = time.monotonic()
         while True:
             deadline = time.monotonic() + self.config.poll_seconds
             while True:
@@ -347,12 +341,12 @@ class Panel:
                 tap = self.touch.wait_for_tap(min(remaining, self.config.check_seconds))
                 if tap is not None:
                     self.handle_tap(tap)
-                    last_tap = time.monotonic()
-                    deadline = last_tap + self.config.poll_seconds
+                    deadline = time.monotonic() + self.config.poll_seconds
                     continue
-                # Taps only ever use partial refresh; the full refresh that
-                # clears their ghosting waits until nobody's using the panel.
-                if self.display.ghosted and time.monotonic() - last_tap >= IDLE_CLEAN_SECONDS:
+                # Every update is partial; the full refresh that clears their
+                # ghosting is the display's call (see cleanup_due) and only
+                # ever happens while the panel is idle.
+                if self.display.cleanup_due():
                     self.draw(force=True)
                 # A completion on the phone or Mac changes this store file's
                 # stat — cheap enough to check every check_seconds rather
@@ -361,10 +355,10 @@ class Panel:
                 if etag is not None and etag != self._last_etag:
                     self._last_etag = etag
                     self.refresh()
-                    self.draw()
+                    self.draw(partial=True)
                     deadline = time.monotonic() + self.config.poll_seconds
             self.refresh()
-            self.draw()
+            self.draw(partial=True)
             self._last_etag = self._peek_etag()
 
     def close(self) -> None:

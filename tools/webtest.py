@@ -51,9 +51,9 @@ from panel.theme import HEIGHT, WHITE, WIDTH  # noqa: E402
 SCALE = 2  # displayed size only; taps are mapped back to panel coordinates
 
 # A full refresh really does take ~1.5s and visibly flashes on real e-paper,
-# so "poll now" (which always does a full refresh — see panel/app.py's
-# module docstring) holds a veil for that long. A tap-driven update goes
-# through partial refresh instead — flicker-free on real hardware, so no
+# so "poll now" (which forces one, standing in for the panel's idle ghosting
+# cleanup — see panel/app.py's module docstring) holds a veil for that long.
+# Every other update goes through partial refresh instead — flicker-free on real hardware, so no
 # veil — and the page just polls the frame quickly enough to catch the
 # checkmark/strikethrough confirmation flash while it's held.
 FULL_REFRESH_MS = 1500
@@ -90,7 +90,7 @@ PAGE = """<!doctype html>
 <p><span id="mode">{mode_label}</span></p>
 <p>Checkbox column completes a task / ticks a checklist item. The rest of a
 task row opens its detail view. The header in detail view goes back.
-Tap-driven updates use partial refresh (fast, no flash, so no veil here) —
+Every update uses partial refresh (fast, no flash, so no veil here) —
 "poll now" forces the real ~1.5s full refresh and its flash instead.</p>
 <script>
 const img = document.getElementById('panel');
@@ -276,7 +276,7 @@ def poll_loop(panel: Panel, lock: threading.Lock, stop: threading.Event) -> None
         with lock:
             if time.monotonic() >= deadline:
                 panel.refresh()
-                panel.draw()
+                panel.draw(partial=True)
                 last_etag = peek_etag()
                 deadline = time.monotonic() + panel.config.poll_seconds
                 continue
@@ -284,7 +284,7 @@ def poll_loop(panel: Panel, lock: threading.Lock, stop: threading.Event) -> None
             if etag is not None and etag != last_etag:
                 last_etag = etag
                 panel.refresh()
-                panel.draw()
+                panel.draw(partial=True)
                 deadline = time.monotonic() + panel.config.poll_seconds
 
 

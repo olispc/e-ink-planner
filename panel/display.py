@@ -7,6 +7,7 @@ before the parcel arrived — not as speculative abstraction.
 """
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from PIL import Image
@@ -19,16 +20,16 @@ class Display:
         raise NotImplementedError
 
     def show_partial(self, image: Image.Image) -> None:
-        """A faster, flicker-free update for tap-driven changes. Backends
-        that have no such mode (or shouldn't bother — png has no ghosting to
-        avoid) just fall back to a full show()."""
+        """A faster, flicker-free update — the app's default for every
+        change. Backends that have no such mode (or shouldn't bother — png
+        has no ghosting to avoid) just fall back to a full show()."""
         self.show(image)
 
-    @property
-    def ghosted(self) -> bool:
-        """Whether partial updates have left residue a full refresh should
-        clear. The app asks this when the panel has gone idle, so the
-        cleanup flash lands after you walk away rather than mid-tap."""
+    def cleanup_due(self) -> bool:
+        """Whether enough partial-update residue has built up, and the panel
+        has been quiet long enough, for a full refresh to clear it now. The
+        app polls this every check tick; it's the only full refresh left
+        besides startup."""
         return False
 
     def close(self) -> None:
@@ -60,13 +61,21 @@ class EPaperDisplay(Display):
     FULL_REFRESH_EVERY below, matching the vendor's own bounded-burst usage
     rather than relying on partial mode indefinitely.
 
-    The cleanup normally happens when the panel goes idle (see `ghosted` and
-    Panel.run), so FULL_REFRESH_EVERY is only a safety net for a long unbroken
-    burst of taps — hence set well above the vendor demo's 10. 40 is a first
-    guess, not measured: lower it if ghosting shows before the idle cleanup.
+    So every update is partial, and the ghosting-clearing full refresh is
+    scheduled by `cleanup_due()` instead: only once CLEANUP_AFTER_PARTIALS
+    have accumulated (the vendor demo's own burst length) and nothing has
+    changed for CLEANUP_IDLE_SECONDS — so the flash lands after you walk
+    away, never under your finger, and a lone background update doesn't
+    earn one. CLEANUP_MAX_AGE bounds how long light residue from a few
+    updates can sit before an idle cleanup anyway. FULL_REFRESH_EVERY is
+    only a safety net for a long unbroken burst. All four are first
+    guesses, not measured: tune them against what the panel actually shows.
     """
 
     FULL_REFRESH_EVERY = 40
+    CLEANUP_AFTER_PARTIALS = 10
+    CLEANUP_IDLE_SECONDS = 60
+    CLEANUP_MAX_AGE = 6 * 3600
 
     def __init__(self) -> None:
         from waveshare_epd import epd7in5_V2  # noqa: WPS433 — Pi-only import
@@ -76,6 +85,8 @@ class EPaperDisplay(Display):
         self.epd.Clear()
         self._in_partial_mode = False
         self._partials_since_full = 0
+        self._last_full_at = time.monotonic()
+        self._last_partial_at = 0.0
 
     def show(self, image: Image.Image) -> None:
         # getbuffer wants a PIL image the size of the panel; mode "1" is what
@@ -85,6 +96,7 @@ class EPaperDisplay(Display):
             self._in_partial_mode = False
         self.epd.display(self.epd.getbuffer(image))
         self._partials_since_full = 0
+        self._last_full_at = time.monotonic()
 
     def show_partial(self, image: Image.Image) -> None:
         if self._partials_since_full >= self.FULL_REFRESH_EVERY:
@@ -95,10 +107,18 @@ class EPaperDisplay(Display):
             self._in_partial_mode = True
         self.epd.display_Partial(self.epd.getbuffer(image), 0, 0, self.epd.width, self.epd.height)
         self._partials_since_full += 1
+        self._last_partial_at = time.monotonic()
 
-    @property
-    def ghosted(self) -> bool:
-        return self._partials_since_full > 0
+    def cleanup_due(self) -> bool:
+        if self._partials_since_full == 0:
+            return False
+        now = time.monotonic()
+        if now - self._last_partial_at < self.CLEANUP_IDLE_SECONDS:
+            return False
+        return (
+            self._partials_since_full >= self.CLEANUP_AFTER_PARTIALS
+            or now - self._last_full_at >= self.CLEANUP_MAX_AGE
+        )
 
     def close(self) -> None:
         # Leaving the panel powered does nothing useful — the image persists

@@ -18,14 +18,13 @@ python3 -m panel.app                  # the real loop
 greyscale-then-threshold — no antialiasing, because the panel has none. A full
 refresh is ~1.5s. The vendored driver also does flicker-free partial refresh
 (confirmed against Waveshare's epd7in5_V2 source and its own demo — see
-`panel/display.py`), but repeated partial updates build up visible ghosting, so
-it's used deliberately, not by default: a poll tick always does a full refresh
-(not latency-sensitive, content can change anywhere), a tap goes through
-partial refresh (latency-sensitive — that's a finger waiting). The full
-refresh that clears the ghosting is deferred until `IDLE_CLEAN_SECONDS` after
-the last tap, so the flash never interrupts a run of ticks;
-`EPaperDisplay.FULL_REFRESH_EVERY` is only a safety net for a long unbroken
-burst. No continuous animation, no cursor, no
+`panel/display.py`), but repeated partial updates build up visible ghosting.
+So every update is partial — taps, their reconciles, background changes, poll
+ticks — and the full refresh (the black/white flash) is reserved for startup
+and one scheduled cleanup: `EPaperDisplay.cleanup_due()`, which fires only
+once enough partials have accumulated *and* the panel has been idle for a
+while, so it never lands under a finger or right after a lone background
+change. `FULL_REFRESH_EVERY` is only a safety net for a long unbroken burst. No continuous animation, no cursor, no
 scrolling — a confirmation on completing a task is two discrete static frames
 (checkmark + strikethrough, held, then removed), not motion.
 
