@@ -36,6 +36,9 @@ class Config:
     touch: str
     png_path: Path
     touch_device: str
+    # "fast" | "normal" — which full-refresh waveform the e-paper backend
+    # uses for the ghosting cleanup. See EPaperDisplay.
+    full_refresh: str = "fast"
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -51,4 +54,5 @@ class Config:
             touch=os.environ.get("PANEL_TOUCH", "none"),
             png_path=Path(png) if Path(png).is_absolute() else REPO_ROOT / png,
             touch_device=os.environ.get("PANEL_TOUCH_DEVICE", "/dev/input/event0"),
+            full_refresh=os.environ.get("PANEL_FULL_REFRESH", "fast"),
         )

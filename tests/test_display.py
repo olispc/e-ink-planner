@@ -14,6 +14,7 @@ class FakeEPD:
     width, height = 800, 480
 
     def init(self): pass
+    def init_fast(self): pass
     def init_part(self): pass
     def getbuffer(self, image): return b""
     def display(self, buf): pass
@@ -24,7 +25,8 @@ def make_display(clock) -> EPaperDisplay:
     # Skip __init__: it imports the Pi-only waveshare driver.
     d = EPaperDisplay.__new__(EPaperDisplay)
     d.epd = FakeEPD()
-    d._in_partial_mode = False
+    d._full_mode = "fast"
+    d._mode = "normal"
     d._partials_since_full = 0
     d._last_full_at = clock[0]
     d._last_partial_at = 0.0

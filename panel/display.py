@@ -7,6 +7,7 @@ before the parcel arrived — not as speculative abstraction.
 """
 from __future__ import annotations
 
+import sys
 import time
 from pathlib import Path
 
@@ -77,13 +78,23 @@ class EPaperDisplay(Display):
     CLEANUP_IDLE_SECONDS = 60
     CLEANUP_MAX_AGE = 6 * 3600
 
-    def __init__(self) -> None:
+    def __init__(self, fast: bool = True) -> None:
         from waveshare_epd import epd7in5_V2  # noqa: WPS433 — Pi-only import
 
         self.epd = epd7in5_V2.EPD()
+        # Startup always takes the thorough normal waveform, once: the panel
+        # may be holding an image from before a crash or power cut.
         self.epd.init()
         self.epd.Clear()
-        self._in_partial_mode = False
+        # init_fast() is the driver's own shorter full refresh: it forces the
+        # controller's temperature reading to 90°C (0xE5=0x5A), which selects
+        # the panel's quicker high-temperature waveform from OTP — the same
+        # trick init_part() plays at 110°C. Still a real full refresh with a
+        # flash, just a shorter one. Unmeasured on this panel whether it
+        # clears ghosting as fully as init(): PANEL_FULL_REFRESH=normal
+        # switches back to compare.
+        self._full_mode = "fast" if fast else "normal"
+        self._mode = "normal"  # which init the controller is currently in
         self._partials_since_full = 0
         self._last_full_at = time.monotonic()
         self._last_partial_at = 0.0
@@ -91,20 +102,27 @@ class EPaperDisplay(Display):
     def show(self, image: Image.Image) -> None:
         # getbuffer wants a PIL image the size of the panel; mode "1" is what
         # it packs from, so no conversion needed.
-        if self._in_partial_mode:
-            self.epd.init()
-            self._in_partial_mode = False
+        if self._mode != self._full_mode:
+            (self.epd.init_fast if self._full_mode == "fast" else self.epd.init)()
+            self._mode = self._full_mode
+        started = time.monotonic()
         self.epd.display(self.epd.getbuffer(image))
-        self._partials_since_full = 0
         self._last_full_at = time.monotonic()
+        # Logged so the two waveforms can be compared on the real panel.
+        print(
+            "full refresh (%s) %.2fs after %d partials"
+            % (self._full_mode, self._last_full_at - started, self._partials_since_full),
+            file=sys.stderr,
+        )
+        self._partials_since_full = 0
 
     def show_partial(self, image: Image.Image) -> None:
         if self._partials_since_full >= self.FULL_REFRESH_EVERY:
             self.show(image)
             return
-        if not self._in_partial_mode:
+        if self._mode != "part":
             self.epd.init_part()
-            self._in_partial_mode = True
+            self._mode = "part"
         self.epd.display_Partial(self.epd.getbuffer(image), 0, 0, self.epd.width, self.epd.height)
         self._partials_since_full += 1
         self._last_partial_at = time.monotonic()
@@ -128,7 +146,7 @@ class EPaperDisplay(Display):
 
 def open_display(config: Config) -> Display:
     if config.display == "epaper":
-        return EPaperDisplay()
+        return EPaperDisplay(fast=config.full_refresh != "normal")
     if config.display == "png":
         return PngDisplay(config.png_path)
     raise ValueError("unknown PANEL_DISPLAY: %s" % config.display)
