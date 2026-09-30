@@ -24,9 +24,10 @@ from .display import open_display
 from .layout import compute_group_order, hit, render, render_detail
 from .touch import open_touch
 
-# One screenful, plus enough to keep the "N more" counter honest without
-# pulling the whole list every five minutes.
-FETCH_LIMIT = 50
+# Per status query, so effectively "everything": the list view paginates, so
+# a lower cap silently hid every task past it (73 live next actions against
+# a cap of 50), and each completion then pulled a new task in from beyond it.
+FETCH_LIMIT = 500
 
 # How long the checkmark+strikethrough confirmation holds before the row
 # disappears and the list reflows. Two static frames, not motion — see the
@@ -247,7 +248,10 @@ class Panel:
             self.draw(force=True, partial=True)
             return
         self.refresh()
-        self.draw()
+        # Still tap-driven, so partial: the reconcile can differ from the
+        # optimistic frame (an edit from another device landing meanwhile),
+        # and clearing the ghosting is the idle cleanup's job, not this one's.
+        self.draw(partial=True)
 
     def _flash_completion(self, task: Task) -> None:
         if self.mode == "detail" and self.detail_task_id == task.id:
@@ -293,7 +297,7 @@ class Panel:
             self.draw(force=True, partial=True)
             return
         self.refresh()
-        self.draw()
+        self.draw(partial=True)
 
     def _toggle_star(self, task_id: str) -> None:
         task = self._find(task_id)
@@ -317,7 +321,7 @@ class Panel:
             self.draw(force=True, partial=True)
             return
         self.refresh()
-        self.draw()
+        self.draw(partial=True)
 
     # -- loop -------------------------------------------------------------
     def _peek_etag(self) -> Optional[str]:
