@@ -16,7 +16,7 @@ python3 -m panel.app                  # the real loop
 
 **Design for 1-bit and for stillness.** Rendering happens in PIL mode `"1"`, not
 greyscale-then-threshold — no antialiasing, because the panel has none. A full
-refresh is ~1.5s. The vendored driver also does flicker-free partial refresh
+refresh measured 1.73s with the fast waveform, 3.84s normal (2026-10-01). The vendored driver also does flicker-free partial refresh
 (confirmed against Waveshare's epd7in5_V2 source and its own demo — see
 `panel/display.py`), but repeated partial updates build up visible ghosting.
 So every update is partial — taps, their reconciles, background changes, poll

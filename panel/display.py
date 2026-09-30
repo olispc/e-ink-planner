@@ -57,7 +57,7 @@ class EPaperDisplay(Display):
     That driver also exposes init_part()/display_Partial(): confirmed against
     the vendored source and its own demo (epd_7in5_V2_test.py), which runs
     ten consecutive partial updates with no full refresh between them. Partial
-    mode is flicker-free and much faster than the ~1.5s full refresh, but
+    mode is flicker-free and much faster than a full refresh (measured 1.73s fast, 3.84s normal), but
     repeated partial updates build up visible ghosting on this panel — hence
     FULL_REFRESH_EVERY below, matching the vendor's own bounded-burst usage
     rather than relying on partial mode indefinitely.

@@ -50,13 +50,13 @@ from panel.theme import HEIGHT, WHITE, WIDTH  # noqa: E402
 
 SCALE = 2  # displayed size only; taps are mapped back to panel coordinates
 
-# A full refresh really does take ~1.5s and visibly flashes on real e-paper,
+# A full refresh really does take ~1.7s (fast waveform) and visibly flashes on real e-paper,
 # so "poll now" (which forces one, standing in for the panel's idle ghosting
 # cleanup — see panel/app.py's module docstring) holds a veil for that long.
 # Every other update goes through partial refresh instead — flicker-free on real hardware, so no
 # veil — and the page just polls the frame quickly enough to catch the
 # checkmark/strikethrough confirmation flash while it's held.
-FULL_REFRESH_MS = 1500
+FULL_REFRESH_MS = 1700
 FAST_POLL_MS = 100
 FAST_POLL_TICKS = 25  # ~2.5s: covers confirmation flash + hold + reconcile
 # Independent of taps entirely — catches a background change (Panel.run()'s
@@ -91,7 +91,7 @@ PAGE = """<!doctype html>
 <p>Checkbox column completes a task / ticks a checklist item. The rest of a
 task row opens its detail view. The header in detail view goes back.
 Every update uses partial refresh (fast, no flash, so no veil here) —
-"poll now" forces the real ~1.5s full refresh and its flash instead.</p>
+"poll now" forces the real ~1.7s full refresh and its flash instead.</p>
 <script>
 const img = document.getElementById('panel');
 const veil = document.getElementById('veil');

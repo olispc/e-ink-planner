@@ -1,6 +1,6 @@
 """The loop: poll, draw, wait for a tap, tick off, repeat.
 
-Redraw discipline is the design constraint. A full refresh is ~1.5s; the
+Redraw discipline is the design constraint. A full refresh is ~1.7s (fast waveform; ~3.8s normal); the
 vendored driver also does flicker-free partial refresh (confirmed against
 Waveshare's epd7in5_V2 source and demo — see display.py), but repeated
 partial updates build up visible ghosting. The split: every update — taps,
