@@ -13,6 +13,12 @@ real.
     python3 tools/webtest.py                 # live, http://127.0.0.1:8765
     python3 tools/webtest.py --fixture        # synthetic data, no network
     python3 tools/webtest.py --port 9000
+    python3 tools/webtest.py --host 0.0.0.0   # reachable from other devices on your LAN
+
+--host 0.0.0.0 is opt-in, not the default: without --fixture, a tap here
+completes real tasks with no auth of its own — its only access control today
+is "can reach 127.0.0.1", which --host 0.0.0.0 gives up in exchange for
+letting your phone reach it too.
 
 --fixture runs against tests/fixtures/tasks.json with an in-memory client —
 no MINDWTR_TOKEN needed, and no PATCH/POST ever reaches the real server.
@@ -282,9 +288,31 @@ def poll_loop(panel: Panel, lock: threading.Lock, stop: threading.Event) -> None
                 deadline = time.monotonic() + panel.config.poll_seconds
 
 
+def _lan_ip() -> str:
+    """The IP another device on the LAN would use to reach this Mac — not
+    necessarily "the" IP (there can be several), just a real one, found the
+    standard way (open a UDP socket toward a public address; nothing is
+    actually sent, it's just how the OS picks which local interface/IP a
+    real connection would go out on)."""
+    import socket
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument(
+        "--host", default="127.0.0.1",
+        help="bind address; 0.0.0.0 to allow other devices on your LAN (see module docstring)",
+    )
     ap.add_argument("--view", default=None, help="next | inbox | waiting | someday | focus")
     ap.add_argument("--fixture", action="store_true", help="synthetic data, no network calls")
     args = ap.parse_args()
@@ -313,9 +341,12 @@ def main() -> int:
     Handler.panel = panel
     Handler.lock = lock
     Handler.mode_label = "FIXTURE — safe, no network" if args.fixture else "LIVE — real writes"
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
-    print("http://127.0.0.1:%d  (view=%s, %s)" % (
-        args.port, config.view,
+    server = ThreadingHTTPServer((args.host, args.port), Handler)
+    # 0.0.0.0 isn't itself a dialable address — print the LAN IP a phone
+    # would actually use instead of the literal bind address.
+    display_host = _lan_ip() if args.host == "0.0.0.0" else args.host
+    print("http://%s:%d  (view=%s, %s)" % (
+        display_host, args.port, config.view,
         "fixture data, no polling" if args.fixture else "polling every %ds" % config.poll_seconds,
     ))
     try:

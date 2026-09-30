@@ -1,24 +1,31 @@
 /*
  * GT911 capacitive touch on a Raspberry Pi 4, for the Good Display
- * GDEY075T7-T01 panel.
+ * GDEY075T7-T01 panel through Good Display's ESP32-FTS02 adapter board.
  *
- * Nothing on I2C announces itself, so the kernel has to be told the chip is
- * there before the mainline `goodix` driver will bind to it. That is all this
- * overlay does.
+ * The FTS02 does not route touch to the Pi's hardware I2C (GPIO2/3). Found
+ * on the bench (2026-09-30) by reading pin levels with and without the touch
+ * FPC in P7, then bit-banging the bus until the chip returned "911":
+ *   SDA  = GPIO6   (board pull-up)
+ *   SCL  = GPIO13  (board pull-up)
+ *   INT  = GPIO19
+ *   addr = 0x14
+ * No hardware I2C controller has 6/13 as a pin pair, so this overlay builds a
+ * software (i2c-gpio) bus there and hangs the mainline `goodix` driver off it.
+ * i2c-gpio only ever pulls lines low and releases them, so it cannot fight
+ * the chip.
  *
- *   sudo apt install device-tree-compiler
+ * TODO(oli): touch RST's Pi GPIO is unknown, so no reset-gpios here. The
+ * driver then skips its reset handshake and talks to the chip at whatever
+ * address it came up on (0x14 so far).
+ *
  *   dtc -@ -I dts -O dtb -o gt911-epaper.dtbo gt911-epaper.dts
  *   sudo cp gt911-epaper.dtbo /boot/firmware/overlays/
  *   # then in /boot/firmware/config.txt:
- *   #   dtparam=i2c_arm=on
  *   #   dtoverlay=gt911-epaper
  *   sudo reboot && evtest        # expect a Goodix device
  *
- * GPIO choices avoid the Waveshare e-Paper Driver HAT, which uses
- * GPIO 8/9/10/11 (SPI0), 17 (RST), 24 (BUSY) and 25 (DC).
- *
- * TODO(oli): the address is 0x5D or 0x14 depending on how INT is held during
- * the chip's reset sequence. If the driver does not bind, try 0x14.
+ * Display pins are untouched: SPI0 plus RST 17, DC 25, BUSY 24 — the same
+ * layout as Waveshare's epd7in5_V2 driver, confirmed working on this board.
  */
 
 /dts-v1/;
@@ -28,32 +35,25 @@
     compatible = "brcm,bcm2711";
 
     fragment@0 {
-        target = <&i2c1>;
+        target-path = "/";
         __overlay__ {
-            #address-cells = <1>;
-            #size-cells = <0>;
-            status = "okay";
-
-            gt911: gt911@5d {
-                compatible = "goodix,gt911";
-                reg = <0x5d>;
-                interrupt-parent = <&gpio>;
-                interrupts = <4 2>;                 /* GPIO4, falling edge */
-                irq-gpios = <&gpio 4 0>;            /* active high */
-                reset-gpios = <&gpio 27 0>;
-                touchscreen-size-x = <800>;
-                touchscreen-size-y = <480>;
+            i2c_touch: i2c@6 {
+                reg = <0xffffffff>;
+                compatible = "i2c-gpio";
+                gpios = <&gpio 6 0      /* sda */
+                         &gpio 13 0>;   /* scl */
+                i2c-gpio,delay-us = <2>;    /* ~100 kHz */
+                #address-cells = <1>;
+                #size-cells = <0>;
                 status = "okay";
-            };
-        };
-    };
 
-    fragment@1 {
-        target = <&gpio>;
-        __overlay__ {
-            gt911_pins: gt911_pins {
-                brcm,pins = <4 27>;
-                brcm,function = <0 1>;              /* IN, OUT */
+                gt911: touchscreen@14 {
+                    compatible = "goodix,gt911";
+                    reg = <0x14>;
+                    interrupt-parent = <&gpio>;
+                    interrupts = <19 1>;    /* driver re-reads trigger from chip config */
+                    status = "okay";
+                };
             };
         };
     };

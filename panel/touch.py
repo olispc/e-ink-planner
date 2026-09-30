@@ -47,9 +47,8 @@ class EvdevTouch(TouchSource):
         self.y_max = y_info.max if y_info else HEIGHT - 1
 
     def _to_panel(self, x: int, y: int) -> Tuple[int, int]:
-        # TODO(oli): with the panel in hand, check whether either axis needs
-        # inverting or the pair swapping — it depends how the digitiser is
-        # bonded relative to the display, and cannot be known from the datasheet.
+        # Checked on the real panel: corner taps read (12, 3) and (793, 479),
+        # so the digitiser's axes match the display — no inversion or swap.
         return (
             int(x * (WIDTH - 1) / max(self.x_max, 1)),
             int(y * (HEIGHT - 1) / max(self.y_max, 1)),

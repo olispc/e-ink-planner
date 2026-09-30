@@ -76,13 +76,28 @@ Finally `cp .env.example ../.env`, set `PANEL_DISPLAY=epaper` and
 
 ## Wiring
 
-Depends on which adapter turns out to be in the box. With the **Waveshare
-e-Paper Driver HAT** the display half is just the header — but set its Display
-Config resistor to **0.47R, position B** for a 7.5in panel, and check whether it
-leaves GPIO2/3 reachable or needs a stacking header for the touch lines.
+The adapter that arrived is Good Display's **ESP32-FTS02** (ordered as the
+STM32-T01; a different board shipped). Its P1 socket pushes straight onto the
+Pi's 40-pin header — no jumper wires — with the board hanging off the Pi's
+edge, Type-C/front-light end towards the Ethernet port. Spec PDF (good-display.com
+is often unreachable): manuals.plus/m/9125c22507ae09f8ed4757b81d6f77e070ab247835fb5baea6a5b7c7f235597d
 
-With Good Display's **STM32-T01** it is jumper wires from its header, using the
-pinout PDF from good-display.com. The "STM32" names the intended host, not a
-requirement: the signals are SPI, I2C and 3.3V, which is what the Pi speaks.
+- **P3 switch → 0.47** (UltraChip controller; 2.2 is for SSD-series panels and
+  the panel won't refresh).
+- **Display ribbon → P5**, panel face up.
+- **Touch → P7** (TP-FPC2, not P6). Its pins on the Pi are *not* the hardware
+  I2C pair — see `overlays/gt911-epaper.dts` for the map and how it was found.
+- Front light (FL-FPC, P0, SS1, FL-SET) is unused and has no software control.
 
-Touch is six wires either way — 3V3, GND, SDA, SCL, INT (GPIO4), RST (GPIO27).
+Touch needs the opposite face to the display, which is what the manual's
+"7.5in must be inserted in reverse orientation" means. With the display ribbon
+in P5 and the panel face up, route touch through the supplied extension
+(orange tail → yellow board → white ribbon → P7) and give the long white
+ribbon a gentle half-turn so it reaches P7 flipped. Both ways round make
+contact at P7, so check rather than trust the face: the wrong way lands a
+ground on GPIO13 and pins it low. Right way: GPIO6/13 idle high, GPIO19
+(INT) driven low, and the chip returns "911" at 0x14.
+
+Seat every ribbon fully and square with the latch flat. A half-seated touch
+ribbon reads as "nothing connected", and some boots with a badly seated
+extension never came online — unplug if the Pi isn't reachable within ~2 min.

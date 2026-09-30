@@ -10,7 +10,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=oli
-WorkingDirectory=/home/oli/eink-planner
+WorkingDirectory=/home/oli/e-ink-planner
 ExecStart=/usr/bin/python3 -m panel.app
 Restart=always
 RestartSec=15
