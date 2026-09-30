@@ -10,10 +10,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from panel.client import ChecklistItem, Task  # noqa: E402
 from panel.layout import (  # noqa: E402
-    _format_due, _organize_tasks, _relative_age, hit, render, render_detail,
+    _format_due, _organize_tasks, _relative_age, compute_group_order, hit, render, render_detail,
 )
 from panel.theme import (  # noqa: E402
-    BLACK, HEADER_H, HEIGHT, MARGIN, ROW_H, ROWS, STAR_ZONE_W, TEXT_RIGHT, TEXT_X, WHITE, WIDTH,
+    BLACK, DETAIL_DESC_MIN_LINES_WITH_CHECKLIST, HEADER_H, HEIGHT, MARGIN, ROW_H, ROWS,
+    STAR_ZONE_W, TEXT_RIGHT, TEXT_X, WHITE, WIDTH,
 )
 
 
@@ -348,6 +349,27 @@ class TestOrganizeTasks(unittest.TestCase):
         headers = [e[1] for e in newest if e[0] == "header"]
         self.assertEqual(headers, ["Music", "Digital", "No area"])
 
+    def test_frozen_group_order_survives_completing_a_groups_oldest_task(self):
+        # Oldest-first: Alpha leads only because of task 0. Completing it
+        # would, unfrozen, make Beta (created day 2) the oldest group.
+        tasks = [
+            task(0, project="Alpha", created_at=_dt(1)),
+            task(1, project="Beta", created_at=_dt(2)),
+            task(2, project="Alpha", created_at=_dt(3)),
+        ]
+        frozen = compute_group_order(tasks, False, True, False, True)
+        remaining = tasks[1:]
+        live, _ = _organize_tasks(remaining, False, True, False, True)
+        held, _ = _organize_tasks(remaining, False, True, False, True, group_order=frozen)
+        self.assertEqual([e[1] for e in live if e[0] == "header"], ["Beta", "Alpha"])
+        self.assertEqual([e[1] for e in held if e[0] == "header"], ["Alpha", "Beta"])
+
+    def test_groups_new_since_the_snapshot_follow_known_ones(self):
+        frozen = compute_group_order([task(0, project="Beta", created_at=_dt(5))], False, True, False, True)
+        tasks = [task(0, project="Beta", created_at=_dt(5)), task(1, project="Alpha", created_at=_dt(1))]
+        entries, _ = _organize_tasks(tasks, False, True, False, True, group_order=frozen)
+        self.assertEqual([e[1] for e in entries if e[0] == "header"], ["Beta", "Alpha"])
+
     def test_area_grouping_alone_ignores_project(self):
         tasks = [task(0, area="Digital", project="Alpha"), task(1, area="Digital", project="Beta")]
         entries, _ = _organize_tasks(tasks, False, True, True, False)
@@ -648,6 +670,77 @@ class TestDetailRendering(unittest.TestCase):
         rendered = render_detail(task(1, checklist=checklist), page=999)
         toggles = [b for b in rendered.hitboxes if b.kind == "toggle"]
         self.assertGreater(len(toggles), 0)
+
+    def test_short_description_needs_no_pager(self):
+        rendered = render_detail(task(1, description="A short note."))
+        self.assertEqual([b for b in rendered.hitboxes if b.kind == "page"], [])
+
+    def test_long_description_with_no_checklist_paginates(self):
+        long_desc = "word " * 400
+        rendered = render_detail(task(1, description=long_desc))
+        pages = [b for b in rendered.hitboxes if b.kind == "page"]
+        self.assertEqual(len(pages), 2)
+
+    def test_long_description_pagination_reaches_every_line(self):
+        # Each page's worth of text should differ — walking through every
+        # page and confirming no two renders are pixel-identical is a cheap
+        # proxy for "the content actually advances," without needing to
+        # extract rendered text back out of a 1-bit image.
+        long_desc = "\n".join("paragraph number %d with some words in it" % i for i in range(40))
+        first = render_detail(task(1, description=long_desc))
+        fwd = _forward_pager(first.hitboxes, "page")
+        self.assertIsNotNone(fwd)
+        seen_images = {first.image.tobytes()}
+        page = fwd.page
+        guard = 0
+        while page != 0 and guard < 20:
+            r = render_detail(task(1, description=long_desc), page=page)
+            seen_images.add(r.image.tobytes())
+            fwd = _forward_pager(r.hitboxes, "page")
+            page = fwd.page if fwd else 0
+            guard += 1
+        self.assertGreater(len(seen_images), 1)
+
+    def test_description_blank_lines_are_preserved_as_paragraph_breaks(self):
+        two_paragraphs = "first paragraph"
+        one_line = render_detail(task(1, description=two_paragraphs)).image
+        with_blank = render_detail(task(1, description="first paragraph\n\nsecond")).image
+        self.assertNotEqual(one_line.tobytes(), with_blank.tobytes())
+
+    def test_long_description_competing_with_checklist_still_shows_checklist(self):
+        # The bug this guards: a long description eating the whole page
+        # would leave zero room for the checklist below it. With both
+        # present, the checklist must still get a real minimum.
+        long_desc = "word " * 400
+        checklist = [item(i, completed=False) for i in range(5)]
+        rendered = render_detail(task(1, description=long_desc, checklist=checklist))
+        toggles = [b for b in rendered.hitboxes if b.kind == "toggle"]
+        self.assertGreater(len(toggles), 0)
+
+    def test_description_competing_with_checklist_has_no_pager_of_its_own(self):
+        # Only one pager fits on screen — when checklist is present,
+        # description is capped rather than independently paginated (the
+        # checklist's own pager, if any, is what "page" hitboxes belong to).
+        long_desc = "word " * 400
+        checklist = [item(i, completed=False) for i in range(2)]
+        rendered = render_detail(task(1, description=long_desc, checklist=checklist))
+        # With only 2 short items, the checklist itself shouldn't need
+        # paging either, so no "page" hitboxes should appear at all.
+        self.assertEqual([b for b in rendered.hitboxes if b.kind == "page"], [])
+
+    def test_description_height_is_capped_when_checklist_present(self):
+        # A 20-line description and a description trimmed to exactly the
+        # guaranteed cap should push the checklist down by the same amount —
+        # proving content past the cap doesn't claim any extra height.
+        long_desc = "\n".join("line %d" % i for i in range(20))
+        with_long = render_detail(task(1, description=long_desc, checklist=[item(0)]))
+        capped_desc = "\n".join(
+            "line %d" % i for i in range(DETAIL_DESC_MIN_LINES_WITH_CHECKLIST)
+        )
+        with_capped = render_detail(task(1, description=capped_desc, checklist=[item(0)]))
+        long_toggle = next(b for b in with_long.hitboxes if b.kind == "toggle")
+        capped_toggle = next(b for b in with_capped.hitboxes if b.kind == "toggle")
+        self.assertEqual(long_toggle.y0, capped_toggle.y0)
 
 
 if __name__ == "__main__":

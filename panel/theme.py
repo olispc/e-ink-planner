@@ -51,6 +51,14 @@ LIST_TEXT_RIGHT = TEXT_RIGHT - STAR_ZONE_W  # title/meta ellipsis width in rende
 # competing for a fixed corner.
 DETAIL_STAR_ZONE_W = 56
 
+# The description snippet's line height (footer-sized text) and, when a
+# checklist is also present and the two are competing for the same space,
+# how many lines description gets guaranteed regardless of how little is
+# left over — a task with a long description AND a long checklist must
+# still show a real minimum of each, not let one crowd the other to zero.
+DETAIL_DESC_LINE_H = 20
+DETAIL_DESC_MIN_LINES_WITH_CHECKLIST = 4
+
 # List-view header controls: home (tap the view title), a focus-sticky
 # toggle, sort direction (newest/oldest by created date), and area/project
 # grouping. All fit in the existing single header row — no extra height
@@ -74,14 +82,21 @@ COLLAPSED_FOOTER_H = 10
 
 BLACK, WHITE = 0, 1           # mode "1" pixel values
 
-# Candidates in preference order: DejaVu ships with Raspberry Pi OS
-# (fonts-dejavu-core); the rest are what a Mac has by default.
+# Zalando Sans (OFL-1.1, bundled below — see fonts/OFL.txt) is the primary
+# font on both platforms, so a Mac dev preview matches the Pi's actual
+# rendering instead of each OS silently falling back to whatever it ships.
+# SemiExpanded, not the default width: Regular read a little condensed at
+# panel sizes. DejaVu/Helvetica/Arial stay as a safety net for a checkout
+# that's somehow missing panel/fonts/.
+_FONT_DIR = Path(__file__).resolve().parent / "fonts"
 _REGULAR = [
+    str(_FONT_DIR / "ZalandoSans-SemiExpanded.ttf"),
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "/System/Library/Fonts/Helvetica.ttc",
     "/Library/Fonts/Arial.ttf",
 ]
 _BOLD = [
+    str(_FONT_DIR / "ZalandoSans-SemiExpandedBold.ttf"),
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     "/System/Library/Fonts/Helvetica.ttc",
     "/Library/Fonts/Arial Bold.ttf",

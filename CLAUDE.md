@@ -21,10 +21,22 @@ refresh is ~1.5s. The vendored driver also does flicker-free partial refresh
 `panel/display.py`), but repeated partial updates build up visible ghosting, so
 it's used deliberately, not by default: a poll tick always does a full refresh
 (not latency-sensitive, content can change anywhere), a tap goes through
-partial refresh (latency-sensitive — that's a finger waiting), capped by
-`EPaperDisplay.FULL_REFRESH_EVERY`. No continuous animation, no cursor, no
+partial refresh (latency-sensitive — that's a finger waiting). The full
+refresh that clears the ghosting is deferred until `IDLE_CLEAN_SECONDS` after
+the last tap, so the flash never interrupts a run of ticks;
+`EPaperDisplay.FULL_REFRESH_EVERY` is only a safety net for a long unbroken
+burst. No continuous animation, no cursor, no
 scrolling — a confirmation on completing a task is two discrete static frames
 (checkmark + strikethrough, held, then removed), not motion.
+
+**The typeface is bundled, not system-supplied.** `panel/fonts/` carries
+Zalando Sans (OFL-1.1, license in that same directory) at its SemiExpanded
+width — the default width read a little condensed at panel sizes, checked
+by rendering actual panel content at real sizes before deciding, not by
+eyeballing a specimen page. `theme.py`'s font-candidate lists put it first
+on both platforms, so a Mac dev preview renders identically to the Pi
+instead of each OS falling back to whatever it ships (DejaVu/Helvetica/
+Arial stay as a safety net after it).
 
 **Never blank on failure.** The image persists with the power off, so a dead
 network must show the last good list *labelled offline*, not an empty screen or
@@ -44,9 +56,10 @@ in the app: x < TEXT_X is always the checkbox column (complete a task, toggle
 a checklist item, or — in the header — go back), x >= TEXT_X is always the
 text (open a task's detail view, or nothing further for a leaf checklist
 item, which has no next level to open). Tapping a task's title opens
-`render_detail()` — full title, meta, a description snippet, and its
-checklist if it has one, unchecked items sorted to the top. Checklist items
-get a full-width tap zone (not split) since a leaf item has only one action.
+`render_detail()` — full title, meta, the full description (not a snippet —
+see below), and its checklist if it has one, unchecked items sorted to the
+top. Checklist items get a full-width tap zone (not split) since a leaf
+item has only one action.
 A task row (list or detail title) adds a third, physically separate column
 at the far right — `theme.STAR_ZONE_W` — for starring: a third gesture on
 top of the existing two would need tap-vs-long-press disambiguation, exactly
@@ -64,6 +77,19 @@ list view reuses the identical mechanism once `total > ROWS`; the one
 difference is the boundary rule (focused vs. backlog) looks at the *global*
 task list across the page split, not just what's visible on the current
 page, so it still lands correctly when the split falls right at a page edge.
+
+**The detail view's description gets real space, not one truncated line —
+but never at the checklist's expense.** `_wrap_paragraphs()` wraps the whole
+description (preserving the author's own blank-line paragraph breaks,
+unlike `_wrap()`'s single-run word-wrap for the title). When a task has no
+checklist, description gets everything down to the footer and paginates —
+same bidirectional "page X/Y" control as the checklist, factored into
+`_draw_detail_pager()` and shared by both — if it's still too long for one
+page. When a checklist is also present, description is capped to a fixed
+`DETAIL_DESC_MIN_LINES_WITH_CHECKLIST` lines with a trailing "…" instead of
+its own pager: only one pager fits on screen, and a task with both a long
+description and a long checklist needs a guaranteed minimum of *each*, not
+one paginated in full while the other gets crowded to zero.
 
 **The header holds real controls, not just a title.** Tapping the view title
 is "home" (list page back to 0 — the toggles below are deliberately left
@@ -106,6 +132,14 @@ even when the backlog under it is grouped — those rows keep their own
 project/area visible). `_paginate()` bin-packs that stream by real height (a
 group header is half a task row) rather than a fixed row count, so paging
 still works when rows aren't all the same size.
+
+**Group order is frozen between deliberate re-sorts.** A group's position
+comes from an aggregate of its members' dates, so completing or starring its
+oldest task would reshuffle the groups mid-session. `Panel._group_order`
+snapshots it (`compute_group_order()`) on the first grouped draw and keeps
+it until a header toggle or the home tap drops it; groups that appear in
+between go after the known ones. Tasks within a group need no freezing —
+removing one never reorders the rest.
 
 **Header status text is not a 5th control.** "updated HH:MM" plus a small
 sync glyph sits next to the date on the right — deliberately smaller (footer

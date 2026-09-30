@@ -16,7 +16,8 @@ from PIL import Image, ImageDraw
 from .client import Task
 from .theme import (
     BLACK, BOX, BOX_X, COLLAPSED_FOOTER_H, DETAIL_BOX, DETAIL_BOX_Y_OFFSET,
-    DETAIL_ROW_H, DETAIL_STAR_ZONE_W, FOCUS_STAR_SIZE, FOOTER_H,
+    DETAIL_DESC_LINE_H, DETAIL_DESC_MIN_LINES_WITH_CHECKLIST, DETAIL_ROW_H,
+    DETAIL_STAR_ZONE_W, FOCUS_STAR_SIZE, FOOTER_H,
     GROUP_HEADER_H, GROUP_ICON_SIZE, GROUP_TOGGLE_BOX, HEADER_H, HEIGHT,
     LIST_TEXT_RIGHT, MARGIN, ROW_H, ROWS, SORT_ARROW_SIZE, STAR_SIZE,
     STAR_ZONE_W, SYNC_ICON_SIZE, TEXT_RIGHT, TEXT_X, WHITE, WIDTH, fonts,
@@ -113,6 +114,30 @@ def _wrap(draw: ImageDraw.ImageDraw, text: str, font, max_width: int, max_lines:
     return lines
 
 
+def _wrap_paragraphs(draw: ImageDraw.ImageDraw, text: str, font, max_width: int) -> List[str]:
+    """Word-wrap the full text with no line cap, preserving the author's own
+    line breaks as paragraph boundaries — description text is free-form
+    notes, not one run-on sentence, so a blank line in it should stay a
+    blank line rather than getting swallowed into the wrap. Unlike _wrap(),
+    this never truncates; the caller decides how much of the result fits."""
+    lines: List[str] = []
+    for raw_line in text.strip("\n").splitlines():
+        words = raw_line.split()
+        if not words:
+            lines.append("")
+            continue
+        current = words[0]
+        for word in words[1:]:
+            candidate = current + " " + word
+            if _text_width(draw, candidate, font) <= max_width:
+                current = candidate
+            else:
+                lines.append(current)
+                current = word
+        lines.append(current)
+    return lines
+
+
 def _draw_check(d: ImageDraw.ImageDraw, x0: int, y0: int, size: int) -> None:
     """Short-then-long tick inside a `size`-px box — confirmation, not a
     fill, so it doesn't collide with the focused/unfocused border rule."""
@@ -150,6 +175,31 @@ def _draw_disclosure(d: ImageDraw.ImageDraw, x0: int, y0: int, size: int, direct
             (x0 + size * 0.78, y0 + size * 0.5),
         ]
     d.polygon(points, fill=BLACK)
+
+
+def _draw_detail_pager(
+    d: ImageDraw.ImageDraw, y0: int, y1: int, page: int, total_pages: int, task_id: str
+) -> List[Hitbox]:
+    """The detail view's bidirectional "page X/Y" row — split left/right
+    into independent previous/next zones, each wrapping at its own end.
+    Shared by checklist pagination and description pagination: same scale
+    (DETAIL_BOX/DETAIL_ROW_H), same visual language, just different content
+    above it, so a task never needs to learn two different pager controls."""
+    f = fonts()
+    box_y = y0 + (y1 - y0 - DETAIL_BOX) // 2
+    text_y = y0 + (y1 - y0 - 20) // 2
+    mid = WIDTH // 2
+    prev_page = (page - 1) % total_pages
+    next_page = (page + 1) % total_pages
+    hitboxes = [
+        Hitbox("page", 0, mid, y0, y1, task_id=task_id, page=prev_page),
+        Hitbox("page", mid, WIDTH, y0, y1, task_id=task_id, page=next_page),
+    ]
+    _draw_disclosure(d, BOX_X, box_y, DETAIL_BOX, direction="left")
+    _draw_disclosure(d, TEXT_RIGHT - DETAIL_BOX, box_y, DETAIL_BOX, direction="right")
+    label = "page %d/%d" % (page + 1, total_pages)
+    d.text(((WIDTH - _text_width(d, label, f.meta)) // 2, text_y), label, font=f.meta, fill=BLACK)
+    return hitboxes
 
 
 def _draw_star(d: ImageDraw.ImageDraw, cx: int, cy: int, size: int, filled: bool) -> None:
@@ -378,6 +428,8 @@ def _grouped_entries(
     group_by_area: bool,
     group_by_project: bool,
     due_first: bool,
+    group_order: Optional[dict] = None,
+    record: Optional[dict] = None,
 ) -> List[tuple]:
     """Bucket by area and/or project. With both on, this emits one combined
     "Area / Project" header per pair rather than nesting two header levels —
@@ -398,8 +450,17 @@ def _grouped_entries(
 
     due_first reorders tasks within each group (via _sort_backlog) but never
     the groups themselves — group header order stays sort_newest-only.
+
+    Group order is an aggregate of its members' dates, so completing or
+    starring a group's oldest task would shuffle the groups under the user's
+    finger. `group_order` (a frozen {(level, parent, name): position}, from
+    `compute_group_order`) pins them instead: known groups keep their frozen
+    position, groups that appeared since follow in fresh order, and the
+    fallback group stays last. Tasks *within* a group need no freezing —
+    removing one leaves the rest in the same relative order. `record`, if
+    given, is filled with the order this call produced.
     """
-    def bucket(source: Sequence[Task], key_fn, fallback: str) -> List[tuple]:
+    def bucket(source: Sequence[Task], key_fn, fallback: str, level: str, parent: str = "") -> List[tuple]:
         buckets: "dict[str, list]" = {}
         for t in source:
             key = key_fn(t) or fallback
@@ -410,23 +471,30 @@ def _grouped_entries(
             key=lambda kv: _group_date_key(kv[1], sort_newest),
             reverse=sort_newest,
         )
+        if group_order is not None:
+            # Stable sort: groups not in the snapshot keep their fresh
+            # relative order, after every known one.
+            named.sort(key=lambda kv: group_order.get((level, parent, kv[0]), len(group_order)))
+        if record is not None:
+            for i, (name, _) in enumerate(named):
+                record[(level, parent, name)] = i
         if unfiled is not None:
             named.append((fallback, unfiled))
         return named
 
     entries: List[tuple] = []
     if group_by_area and group_by_project:
-        for area_name, area_tasks in bucket(items, lambda t: t.area, "No area"):
-            for proj_name, proj_tasks in bucket(area_tasks, lambda t: t.project, "No project"):
+        for area_name, area_tasks in bucket(items, lambda t: t.area, "No area", "area"):
+            for proj_name, proj_tasks in bucket(area_tasks, lambda t: t.project, "No project", "project", area_name):
                 label = area_name if proj_name == "No project" else "%s / %s" % (area_name, proj_name)
                 entries.append(("header", label, "both"))
                 entries.extend(("task", t, True) for t in _sort_backlog(proj_tasks, sort_newest, due_first))
     elif group_by_area:
-        for area_name, area_tasks in bucket(items, lambda t: t.area, "No area"):
+        for area_name, area_tasks in bucket(items, lambda t: t.area, "No area", "area"):
             entries.append(("header", area_name, "area"))
             entries.extend(("task", t, True) for t in _sort_backlog(area_tasks, sort_newest, due_first))
     else:  # project grouping only
-        for proj_name, proj_tasks in bucket(items, lambda t: t.project, "No project"):
+        for proj_name, proj_tasks in bucket(items, lambda t: t.project, "No project", "project"):
             entries.append(("header", proj_name, "project"))
             entries.extend(("task", t, True) for t in _sort_backlog(proj_tasks, sort_newest, due_first))
     return entries
@@ -439,6 +507,8 @@ def _organize_tasks(
     group_by_area: bool,
     group_by_project: bool,
     due_first: bool = False,
+    group_order: Optional[dict] = None,
+    record: Optional[dict] = None,
 ) -> Tuple[List[tuple], bool]:
     """Turns the fetched task list into a stream of ("task", Task, in_group)
     and ("header", label, icon) entries, per the current toggles.
@@ -468,16 +538,31 @@ def _organize_tasks(
     if not focus_sticky:
         if not grouping:
             return [("task", t, False) for t in _sort_backlog(ordered, sort_newest, due_first)], False
-        return _grouped_entries(ordered, sort_newest, group_by_area, group_by_project, due_first), False
+        return _grouped_entries(ordered, sort_newest, group_by_area, group_by_project, due_first, group_order, record), False
 
     focused = [t for t in ordered if t.focused]
     rest = [t for t in ordered if not t.focused]
     entries: List[tuple] = [("task", t, False) for t in _sort_by_date(focused, sort_newest)]
     if grouping:
-        entries.extend(_grouped_entries(rest, sort_newest, group_by_area, group_by_project, due_first))
+        entries.extend(_grouped_entries(rest, sort_newest, group_by_area, group_by_project, due_first, group_order, record))
     else:
         entries.extend(("task", t, False) for t in _sort_backlog(rest, sort_newest, due_first))
     return entries, True
+
+
+def compute_group_order(
+    tasks: Sequence[Task],
+    sort_newest: bool,
+    focus_sticky: bool,
+    group_by_area: bool,
+    group_by_project: bool,
+) -> dict:
+    """Snapshot of the current group order, to hand back to render() as
+    `group_order` so later completions/stars don't reshuffle the groups."""
+    record: dict = {}
+    _organize_tasks(tasks, sort_newest, focus_sticky, group_by_area, group_by_project,
+                    record=record)
+    return record
 
 
 def _entry_height(entry: tuple) -> int:
@@ -521,6 +606,7 @@ def render(
     group_by_area: bool = False,
     group_by_project: bool = False,
     due_first: bool = False,
+    group_order: Optional[dict] = None,
 ) -> Rendered:
     now = now or datetime.now()
     f = fonts()
@@ -531,7 +617,8 @@ def render(
     total = len(all_tasks) if total is None else total
 
     entries, allow_boundary = _organize_tasks(
-        all_tasks, sort_newest, focus_sticky, group_by_area, group_by_project, due_first
+        all_tasks, sort_newest, focus_sticky, group_by_area, group_by_project, due_first,
+        group_order=group_order,
     )
     # The footer only has something to say when offline — otherwise it's
     # dead space "updated HH:MM" (now in the header, see below) used to
@@ -805,28 +892,54 @@ def render_detail(
     # than a second, easy-to-hit-by-accident way to complete the task.
     hitboxes.append(Hitbox("complete", 0, TEXT_X, HEADER_H, title_row_bottom, task_id=task.id))
 
-    # --- meta + a one-line description snippet -----------------------------
+    # --- meta + description --------------------------------------------------
+    fy = HEIGHT - FOOTER_H
     y = title_row_bottom + 4
     meta = _append_age_due(_meta_line(task), task, now)
     if meta:
         d.text((TEXT_X, y), _ellipsize(d, meta, f.meta, TEXT_RIGHT - TEXT_X), font=f.meta, fill=BLACK)
         y += 24
     if task.description:
-        snippet = task.description.strip().splitlines()[0] if task.description.strip() else ""
-        if snippet:
-            d.text(
-                (TEXT_X, y),
-                _ellipsize(d, snippet, f.footer, TEXT_RIGHT - TEXT_X),
-                font=f.footer, fill=BLACK,
-            )
-            y += 20
+        max_width = TEXT_RIGHT - TEXT_X
+        all_lines = _wrap_paragraphs(d, task.description.strip(), f.footer, max_width)
+        if task.checklist:
+            # Competing with a checklist below — a fixed, generous
+            # allocation rather than the full page, so the checklist always
+            # keeps a real minimum too instead of being crowded to zero.
+            visible_desc = all_lines[:DETAIL_DESC_MIN_LINES_WITH_CHECKLIST]
+            if len(all_lines) > len(visible_desc) and visible_desc:
+                visible_desc[-1] = _ellipsize(d, visible_desc[-1] + " …", f.footer, max_width)
+            for line in visible_desc:
+                d.text((TEXT_X, y), line, font=f.footer, fill=BLACK)
+                y += DETAIL_DESC_LINE_H
+        else:
+            # Nothing else needs this space — description gets all of it,
+            # paginated (same control as the checklist) if even that isn't
+            # enough to show the whole thing at once.
+            reserved_below = 16  # the rule + gap drawn right after this block
+            available = max(DETAIL_DESC_LINE_H, fy - y - reserved_below)
+            total_h = len(all_lines) * DETAIL_DESC_LINE_H
+            if total_h <= available:
+                desc_page, desc_total_pages, visible_desc = 0, 1, all_lines
+            else:
+                capacity = max(DETAIL_DESC_LINE_H, available - DETAIL_ROW_H)
+                lines_per_page = max(1, capacity // DETAIL_DESC_LINE_H)
+                desc_total_pages = max(1, -(-len(all_lines) // lines_per_page))
+                desc_page = max(0, min(page, desc_total_pages - 1))
+                start = desc_page * lines_per_page
+                visible_desc = all_lines[start:start + lines_per_page]
+            for line in visible_desc:
+                d.text((TEXT_X, y), line, font=f.footer, fill=BLACK)
+                y += DETAIL_DESC_LINE_H
+            if desc_total_pages > 1:
+                hitboxes.extend(_draw_detail_pager(d, y, y + DETAIL_ROW_H, desc_page, desc_total_pages, task.id))
+                y += DETAIL_ROW_H
 
     y += 6
     d.line([(MARGIN, y), (TEXT_RIGHT, y)], fill=BLACK, width=1)
     y += 10
 
     # --- checklist: unchecked individually, done items stacked -------------
-    fy = HEIGHT - FOOTER_H
     unchecked = [item for item in task.checklist if not item.completed]
     done = [item for item in task.checklist if item.completed]
     entries: List[Tuple[str, object]] = [("item", item) for item in unchecked]
@@ -890,21 +1003,7 @@ def render_detail(
     if needs_paging:
         pi = len(visible)
         iy0 = y + pi * DETAIL_ROW_H
-        iy1 = iy0 + DETAIL_ROW_H
-        box_y2 = iy0 + DETAIL_BOX_Y_OFFSET
-        text_y = iy0 + (DETAIL_ROW_H - 20) // 2
-        mid = WIDTH // 2
-        prev_page = (page - 1) % total_pages
-        next_page = (page + 1) % total_pages
-        hitboxes.append(Hitbox("page", 0, mid, iy0, iy1, task_id=task.id, page=prev_page))
-        hitboxes.append(Hitbox("page", mid, WIDTH, iy0, iy1, task_id=task.id, page=next_page))
-        _draw_disclosure(d, BOX_X, box_y2, DETAIL_BOX, direction="left")
-        _draw_disclosure(d, TEXT_RIGHT - DETAIL_BOX, box_y2, DETAIL_BOX, direction="right")
-        label = "page %d/%d" % (page + 1, total_pages)
-        d.text(
-            ((WIDTH - _text_width(d, label, f.meta)) // 2, text_y),
-            label, font=f.meta, fill=BLACK,
-        )
+        hitboxes.extend(_draw_detail_pager(d, iy0, iy0 + DETAIL_ROW_H, page, total_pages, task.id))
 
     # --- footer: checklist progress, not a poll timestamp -------------------
     fy_line = HEIGHT - FOOTER_H

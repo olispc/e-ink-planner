@@ -21,7 +21,7 @@ from typing import List, Optional
 from .client import MindwtrClient, MindwtrError, Task
 from .config import Config
 from .display import open_display
-from .layout import hit, render, render_detail
+from .layout import compute_group_order, hit, render, render_detail
 from .touch import open_touch
 
 # One screenful, plus enough to keep the "N more" counter honest without
@@ -32,6 +32,11 @@ FETCH_LIMIT = 50
 # disappears and the list reflows. Two static frames, not motion — see the
 # module docstring — so this is a deliberate pause, not a frame duration.
 CONFIRM_SECONDS = 0.45
+
+# How long after the last tap before a full refresh clears partial-update
+# ghosting. Long enough that a run of ticks never gets interrupted by the
+# ~1.5s black/white flash; short enough the residue doesn't sit there all day.
+IDLE_CLEAN_SECONDS = 60
 
 
 class Panel:
@@ -65,6 +70,11 @@ class Panel:
         # soonest due first — never touches the focus-sticky leading
         # section, which stays exempt as "the starred list" regardless.
         self.due_first: bool = False
+        # Frozen group order (see layout.compute_group_order): taken lazily
+        # on the first grouped draw, dropped whenever the user changes a
+        # toggle or taps home, so completing/starring tasks never reshuffles
+        # the groups — only a deliberate re-sort does.
+        self._group_order: Optional[dict] = None
         self._last_signature: Optional[tuple] = None
         self._last_etag: Optional[str] = None
 
@@ -79,6 +89,16 @@ class Panel:
             if self.stale_since is None:
                 self.stale_since = datetime.now()
             print("refresh failed: %s" % exc, file=sys.stderr)
+
+    def _frozen_group_order(self) -> Optional[dict]:
+        if not (self.group_by_area or self.group_by_project):
+            return None
+        if self._group_order is None:
+            self._group_order = compute_group_order(
+                self.tasks, self.sort_newest, self.focus_sticky,
+                self.group_by_area, self.group_by_project,
+            )
+        return self._group_order
 
     def _find(self, task_id: Optional[str]) -> Optional[Task]:
         if task_id is None:
@@ -132,6 +152,7 @@ class Panel:
                 group_by_area=self.group_by_area,
                 group_by_project=self.group_by_project,
                 due_first=self.due_first,
+                group_order=self._frozen_group_order(),
             )
         if partial:
             self.display.show_partial(rendered.image)
@@ -171,26 +192,32 @@ class Panel:
             self.list_page = box.page
             self.draw(force=True, partial=True)
         elif box.kind == "home":
+            self._group_order = None
             self.list_page = 0
             self.draw(force=True, partial=True)
         elif box.kind == "sort_toggle":
             self.sort_newest = not self.sort_newest
+            self._group_order = None
             self.list_page = 0
             self.draw(force=True, partial=True)
         elif box.kind == "focus_sticky":
             self.focus_sticky = not self.focus_sticky
+            self._group_order = None
             self.list_page = 0
             self.draw(force=True, partial=True)
         elif box.kind == "toggle_project_view":
             self.group_by_project = not self.group_by_project
+            self._group_order = None
             self.list_page = 0
             self.draw(force=True, partial=True)
         elif box.kind == "toggle_area_view":
             self.group_by_area = not self.group_by_area
+            self._group_order = None
             self.list_page = 0
             self.draw(force=True, partial=True)
         elif box.kind == "toggle_due_first":
             self.due_first = not self.due_first
+            self._group_order = None
             self.list_page = 0
             self.draw(force=True, partial=True)
 
@@ -235,6 +262,7 @@ class Panel:
                 sort_newest=self.sort_newest, focus_sticky=self.focus_sticky,
                 group_by_area=self.group_by_area, group_by_project=self.group_by_project,
                 due_first=self.due_first,
+                group_order=self._frozen_group_order(),
             )
         self.display.show_partial(rendered.image)
         self.hitboxes = rendered.hitboxes
@@ -305,6 +333,7 @@ class Panel:
         self.refresh()
         self.draw(force=True)
         self._last_etag = self._peek_etag()
+        last_tap = time.monotonic()
         while True:
             deadline = time.monotonic() + self.config.poll_seconds
             while True:
@@ -314,8 +343,13 @@ class Panel:
                 tap = self.touch.wait_for_tap(min(remaining, self.config.check_seconds))
                 if tap is not None:
                     self.handle_tap(tap)
-                    deadline = time.monotonic() + self.config.poll_seconds
+                    last_tap = time.monotonic()
+                    deadline = last_tap + self.config.poll_seconds
                     continue
+                # Taps only ever use partial refresh; the full refresh that
+                # clears their ghosting waits until nobody's using the panel.
+                if self.display.ghosted and time.monotonic() - last_tap >= IDLE_CLEAN_SECONDS:
+                    self.draw(force=True)
                 # A completion on the phone or Mac changes this store file's
                 # stat — cheap enough to check every check_seconds rather
                 # than waiting out the full poll_seconds fallback.

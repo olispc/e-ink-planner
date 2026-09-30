@@ -24,6 +24,13 @@ class Display:
         avoid) just fall back to a full show()."""
         self.show(image)
 
+    @property
+    def ghosted(self) -> bool:
+        """Whether partial updates have left residue a full refresh should
+        clear. The app asks this when the panel has gone idle, so the
+        cleanup flash lands after you walk away rather than mid-tap."""
+        return False
+
     def close(self) -> None:
         pass
 
@@ -52,9 +59,14 @@ class EPaperDisplay(Display):
     repeated partial updates build up visible ghosting on this panel — hence
     FULL_REFRESH_EVERY below, matching the vendor's own bounded-burst usage
     rather than relying on partial mode indefinitely.
+
+    The cleanup normally happens when the panel goes idle (see `ghosted` and
+    Panel.run), so FULL_REFRESH_EVERY is only a safety net for a long unbroken
+    burst of taps — hence set well above the vendor demo's 10. 40 is a first
+    guess, not measured: lower it if ghosting shows before the idle cleanup.
     """
 
-    FULL_REFRESH_EVERY = 15
+    FULL_REFRESH_EVERY = 40
 
     def __init__(self) -> None:
         from waveshare_epd import epd7in5_V2  # noqa: WPS433 — Pi-only import
@@ -83,6 +95,10 @@ class EPaperDisplay(Display):
             self._in_partial_mode = True
         self.epd.display_Partial(self.epd.getbuffer(image), 0, 0, self.epd.width, self.epd.height)
         self._partials_since_full += 1
+
+    @property
+    def ghosted(self) -> bool:
+        return self._partials_since_full > 0
 
     def close(self) -> None:
         # Leaving the panel powered does nothing useful — the image persists
