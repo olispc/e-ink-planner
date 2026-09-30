@@ -77,6 +77,7 @@ class EPaperDisplay(Display):
     CLEANUP_AFTER_PARTIALS = 10
     CLEANUP_IDLE_SECONDS = 60
     CLEANUP_MAX_AGE = 6 * 3600
+    FAST_PER_NORMAL = 3  # fast full refreshes between each normal one
 
     def __init__(self, fast: bool = True) -> None:
         from waveshare_epd import epd7in5_V2  # noqa: WPS433 — Pi-only import
@@ -90,10 +91,12 @@ class EPaperDisplay(Display):
         # controller's temperature reading to 90°C (0xE5=0x5A), which selects
         # the panel's quicker high-temperature waveform from OTP — the same
         # trick init_part() plays at 110°C. Still a real full refresh with a
-        # flash, just a shorter one. Unmeasured on this panel whether it
-        # clears ghosting as fully as init(): PANEL_FULL_REFRESH=normal
-        # switches back to compare.
-        self._full_mode = "fast" if fast else "normal"
+        # flash, just a shorter one (1.73s vs 3.84s, measured). It clears most
+        # ghosting but not all of it by eye, so after FAST_PER_NORMAL fast
+        # ones the next full refresh takes the normal waveform to mop up what
+        # they left. PANEL_FULL_REFRESH=normal makes every one normal.
+        self._fast = fast
+        self._fasts_since_normal = 0  # startup's init()+Clear() just counted as normal
         self._mode = "normal"  # which init the controller is currently in
         self._partials_since_full = 0
         self._last_full_at = time.monotonic()
@@ -102,16 +105,18 @@ class EPaperDisplay(Display):
     def show(self, image: Image.Image) -> None:
         # getbuffer wants a PIL image the size of the panel; mode "1" is what
         # it packs from, so no conversion needed.
-        if self._mode != self._full_mode:
-            (self.epd.init_fast if self._full_mode == "fast" else self.epd.init)()
-            self._mode = self._full_mode
+        want = "fast" if self._fast and self._fasts_since_normal < self.FAST_PER_NORMAL else "normal"
+        if self._mode != want:
+            (self.epd.init_fast if want == "fast" else self.epd.init)()
+            self._mode = want
         started = time.monotonic()
         self.epd.display(self.epd.getbuffer(image))
         self._last_full_at = time.monotonic()
+        self._fasts_since_normal = self._fasts_since_normal + 1 if want == "fast" else 0
         # Logged so the two waveforms can be compared on the real panel.
         print(
             "full refresh (%s) %.2fs after %d partials"
-            % (self._full_mode, self._last_full_at - started, self._partials_since_full),
+            % (want, self._last_full_at - started, self._partials_since_full),
             file=sys.stderr,
         )
         self._partials_since_full = 0
