@@ -158,6 +158,23 @@ class Panel:
         self._last_signature = signature
 
     # -- interaction ------------------------------------------------------
+    def handle_gesture(self, gesture) -> None:
+        if gesture.kind == "swipe":
+            self.handle_swipe(gesture.dx)
+        else:
+            self.handle_tap((gesture.x, gesture.y))
+
+    def handle_swipe(self, dx: int) -> None:
+        """Page-turn like a Kindle: dragging left reveals the next page,
+        dragging right the previous. The current screen's own pager hitboxes
+        already say which page that is (and wrap at the ends), so this just
+        borrows them — a screen with no pager has nothing to turn."""
+        pagers = [b for b in getattr(self, "hitboxes", []) if b.kind in ("list_page", "page")]
+        if not pagers:
+            return
+        box = max(pagers, key=lambda b: b.x0) if dx < 0 else min(pagers, key=lambda b: b.x0)
+        self.handle_tap((box.x0 + 1, box.y0 + 1))
+
     def handle_tap(self, point) -> None:
         box = hit(getattr(self, "hitboxes", []), point)
         if box is None:
@@ -338,9 +355,9 @@ class Panel:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
-                tap = self.touch.wait_for_tap(min(remaining, self.config.check_seconds))
-                if tap is not None:
-                    self.handle_tap(tap)
+                gesture = self.touch.wait_for_gesture(min(remaining, self.config.check_seconds))
+                if gesture is not None:
+                    self.handle_gesture(gesture)
                     deadline = time.monotonic() + self.config.poll_seconds
                     continue
                 # Every update is partial; the full refresh that clears their

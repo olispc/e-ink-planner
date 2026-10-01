@@ -77,6 +77,16 @@ difference is the boundary rule (focused vs. backlog) looks at the *global*
 task list across the page split, not just what's visible on the current
 page, so it still lands correctly when the split falls right at a page edge.
 
+**Swiping is a second way to hit the pager, not a new paging system.** A
+horizontal drag anywhere (left = next page, right = previous, Kindle-style)
+borrows the current screen's own `list_page`/`page` hitboxes via
+`Panel.handle_swipe()`, so wrap-around and page numbers stay in one place and
+a screen with no pager ignores it. `touch.classify()` decides tap vs swipe
+from the stroke's start and end: under `TAP_SLOP` is a tap (at the landing
+point), over `SWIPE_MIN_DX` and mostly sideways is a swipe, anything else is
+dropped — so a vertical drag no longer fires a tap where the finger lifted.
+Page turns are partial refreshes like every other update.
+
 **The detail view's description gets real space, not one truncated line —
 but never at the checklist's expense.** `_wrap_paragraphs()` wraps the whole
 description (preserving the author's own blank-line paragraph breaks,

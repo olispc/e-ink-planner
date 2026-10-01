@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from panel.app import Panel  # noqa: E402
 from panel.client import Task  # noqa: E402
 from panel.config import Config  # noqa: E402
+from panel.touch import Gesture, classify  # noqa: E402
 
 
 def task(n: int, **kw) -> Task:
@@ -213,6 +214,46 @@ class TestListPagination(unittest.TestCase):
         backward = min(pagers, key=lambda b: b.x0)  # left half of the row
         panel.handle_tap((backward.x0 + 10, backward.y0 + 10))
         self.assertEqual(panel.list_page, backward.page)
+
+
+class TestSwipePaging(unittest.TestCase):
+    def _paged(self):
+        panel = make_panel([task(i) for i in range(25)])
+        panel.refresh()
+        panel.draw(force=True)
+        return panel
+
+    def test_swipe_left_goes_to_next_page(self):
+        panel = self._paged()
+        panel.handle_gesture(Gesture("swipe", 600, 200, dx=-300))
+        self.assertEqual(panel.list_page, 1)
+
+    def test_swipe_right_wraps_to_last_page(self):
+        panel = self._paged()
+        panel.handle_gesture(Gesture("swipe", 200, 200, dx=300))
+        self.assertNotEqual(panel.list_page, 0)
+
+    def test_swipe_without_a_pager_does_nothing(self):
+        panel = make_panel([task(1)])
+        panel.refresh()
+        panel.draw(force=True)
+        panel.handle_gesture(Gesture("swipe", 600, 200, dx=-300))
+        self.assertEqual(panel.list_page, 0)
+
+
+class TestClassify(unittest.TestCase):
+    def test_small_movement_is_a_tap_at_the_landing_point(self):
+        self.assertEqual(classify((100, 100), (110, 105)), Gesture("tap", 100, 100))
+
+    def test_long_horizontal_stroke_is_a_swipe(self):
+        self.assertEqual(classify((600, 200), (300, 210)), Gesture("swipe", 600, 200, -300))
+
+    def test_vertical_or_diagonal_drag_is_ignored(self):
+        self.assertIsNone(classify((100, 100), (110, 300)))
+        self.assertIsNone(classify((100, 100), (300, 300)))
+
+    def test_short_sideways_wobble_is_ignored(self):
+        self.assertIsNone(classify((100, 100), (160, 100)))
 
 
 class TestHeaderControls(unittest.TestCase):
