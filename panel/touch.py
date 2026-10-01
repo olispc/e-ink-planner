@@ -21,7 +21,7 @@ from .theme import HEIGHT, WIDTH
 # between (a wobbly press, a vertical drag) is neither and does nothing —
 # the same cancel-by-dragging-off behaviour taps have always promised.
 TAP_SLOP = 30
-SWIPE_MIN_DX = 120
+SWIPE_MIN_DX = 80
 
 
 @dataclass(frozen=True)
