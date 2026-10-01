@@ -10,7 +10,10 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=oli
-WorkingDirectory=/home/oli/e-ink-planner
+# The copy with the real .env (Config reads <repo root>/.env) and current code.
+WorkingDirectory=/home/oli/e-ink-planner-dev
+# Waveshare's driver isn't on PyPI; it is vendored here (see deploy/README.md).
+Environment=PYTHONPATH=/home/oli/waveshare-lib
 ExecStart=/usr/bin/python3 -m panel.app
 Restart=always
 RestartSec=15
