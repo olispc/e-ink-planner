@@ -18,6 +18,14 @@ FOOTER_H = 44
 ROW_H = 62
 ROWS = (HEIGHT - HEADER_H - FOOTER_H) // ROW_H  # 6
 
+# The list view's "‹ page X/Y ›" row. Deliberately shorter than a task row:
+# with the footer collapsed (the normal, online case) HEIGHT - HEADER_H - 10
+# is exactly 6 task rows + this, so a paged list still shows 6 tasks per page
+# instead of 5 plus blank space. Swiping is the other way to turn a page, so
+# the thinner tap zone isn't the only route.
+PAGER_H = 34
+PAGER_BOX = 22                # arrow glyph edge, scaled down with the row
+
 MARGIN = 20
 BOX = 34                      # checkbox edge
 BOX_X = MARGIN + 4

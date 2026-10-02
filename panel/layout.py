@@ -19,7 +19,7 @@ from .theme import (
     DETAIL_DESC_LINE_H, DETAIL_DESC_MIN_LINES_WITH_CHECKLIST, DETAIL_ROW_H,
     DETAIL_STAR_ZONE_W, FOCUS_STAR_SIZE, FOOTER_H,
     GROUP_HEADER_H, GROUP_ICON_SIZE, GROUP_TOGGLE_BOX, HEADER_H, HEIGHT,
-    LIST_TEXT_RIGHT, MARGIN, ROW_H, ROWS, SORT_ARROW_SIZE, STAR_SIZE,
+    LIST_TEXT_RIGHT, MARGIN, PAGER_BOX, PAGER_H, ROW_H, ROWS, SORT_ARROW_SIZE, STAR_SIZE,
     STAR_ZONE_W, SYNC_ICON_SIZE, TEXT_RIGHT, TEXT_X, WHITE, WIDTH, fonts,
 )
 
@@ -626,7 +626,7 @@ def render(
     # online gives that back to pagination/grouping headroom.
     footer_h = FOOTER_H if stale_since is not None else COLLAPSED_FOOTER_H
     available_h = HEIGHT - HEADER_H - footer_h
-    pages, needs_paging = _paginate(entries, available_h, ROW_H)
+    pages, needs_paging = _paginate(entries, available_h, PAGER_H)
     total_pages = len(pages)
     page = max(0, min(page, total_pages - 1))
     visible = pages[page]
@@ -797,22 +797,23 @@ def render(
         y += ROW_H
 
     if needs_paging:
-        y0, y1 = y, y + ROW_H
+        y0, y1 = y, y + PAGER_H
         mid = WIDTH // 2
         prev_page = (page - 1) % total_pages
         next_page = (page + 1) % total_pages
         # Split the row itself rather than adding a second row — screen
-        # space here is already scarce, and a half-row target is still well
-        # past the ~9mm minimum thumb tap (see theme.py).
+        # space here is already scarce. Shorter than a task row (PAGER_H),
+        # which is what lets 6 tasks fit above it; swiping is the other
+        # way to turn a page.
         hitboxes.append(Hitbox("list_page", 0, mid, y0, y1, page=prev_page))
         hitboxes.append(Hitbox("list_page", mid, WIDTH, y0, y1, page=next_page))
-        box_y = y0 + (ROW_H - BOX) // 2
-        _draw_disclosure(d, BOX_X, box_y, BOX, direction="left")
-        _draw_disclosure(d, WIDTH - MARGIN - BOX, box_y, BOX, direction="right")
+        box_y = y0 + (PAGER_H - PAGER_BOX) // 2
+        _draw_disclosure(d, BOX_X, box_y, PAGER_BOX, direction="left")
+        _draw_disclosure(d, WIDTH - MARGIN - PAGER_BOX, box_y, PAGER_BOX, direction="right")
         label = "page %d/%d" % (page + 1, total_pages)
         d.text(
-            ((WIDTH - _text_width(d, label, f.title)) // 2, y0 + 20),
-            label, font=f.title, fill=BLACK,
+            ((WIDTH - _text_width(d, label, f.meta)) // 2, y0 + (PAGER_H - 20) // 2),
+            label, font=f.meta, fill=BLACK,
         )
 
     # --- footer -------------------------------------------------------------
