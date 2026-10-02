@@ -3,6 +3,13 @@
 A 7.5in e-paper panel on the workspace wall showing live Mindwtr next actions,
 tappable to tick them off.
 
+> **Work in progress.** This is a personal project that I'm using daily and
+> changing as I go. Features will be added, layout numbers will move, and
+> nothing here is stable or versioned. It is built for one specific panel and
+> one specific setup (below); treat it as a reference to read and adapt rather
+> than something that installs cleanly. Issues and ideas are welcome, but
+> expect rough edges.
+
 Mindwtr's desktop API is bound to loopback and only runs while the app is open,
 so the panel does not talk to it. Instead a Raspberry Pi runs **mindwtr-cloud**,
 the self-hosted sync server Mindwtr ships, and becomes the source of truth the
@@ -59,6 +66,36 @@ in is the difference between a planner and a random sample.
 
 Nothing starred is not a failure state — the panel is then simply next actions,
 so the focus flag earns its place without being load-bearing.
+
+## Using a different display
+
+Not tested on anything but the panel above, but the code is split so it should
+be adaptable. The data flows one way: Mindwtr server → `panel/client.py` →
+`panel/layout.py` (draws a PIL 1-bit image) → a `Display` backend. Only that
+last step knows what hardware is attached.
+
+| Piece | Display-specific? | On a different screen |
+| --- | --- | --- |
+| `client.py`, `app.py`, tap and swipe handling | No | Works unchanged |
+| `layout.py` | No, but it assumes the size in `theme.py` | Works if the screen is about 800×480 |
+| `touch.py` | Reads any evdev touchscreen and rescales to the layout size | Works; rotation and axis swaps aren't handled |
+| `display.py` | `EPaperDisplay` is hard-wired to Waveshare's `epd7in5_V2` | Needs a new backend |
+
+To drive another screen, write a `Display` subclass (`show(image)` is the only
+required method; the partial-refresh and ghosting-cleanup methods default to
+no-ops, which is right for an LCD) and add it to `open_display()`. A
+framebuffer, a small SPI LCD, or a pygame window would each be about 20 lines.
+
+What isn't done yet:
+
+- **Resolution is hardcoded.** `theme.py` fixes 800×480, and every number in it
+  is tuned to this panel's 124 ppi. A smaller screen needs `WIDTH`, `HEIGHT`,
+  `ROW_H` and the related constants changed together; at 480×320 only about
+  three task rows fit.
+- **It's 1-bit on purpose.** There is no antialiasing and no colour, so on an
+  LCD it will look like a monochrome screen.
+- **It needs a Mindwtr sync server.** The panel talks to `mindwtr-cloud`'s
+  `/v1/*` routes and nothing else, so it's of no use without one.
 
 ## Configuration
 
