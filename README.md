@@ -102,3 +102,8 @@ What isn't done yet:
 Everything is environment variables; see `.env.example`. The two that change
 behaviour most are `PANEL_DISPLAY` (`png` or `epaper`) and `PANEL_TOUCH`
 (`none` or `evdev`).
+
+## License
+
+MIT, see [LICENSE](LICENSE). The bundled Zalando Sans font is separate and
+licensed under the OFL-1.1, see [panel/fonts/OFL.txt](panel/fonts/OFL.txt).
