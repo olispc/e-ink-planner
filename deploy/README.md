@@ -101,3 +101,37 @@ ground on GPIO13 and pins it low. Right way: GPIO6/13 idle high, GPIO19
 Seat every ribbon fully and square with the latch flat. A half-seated touch
 ribbon reads as "nothing connected", and some boots with a badly seated
 extension never came online — unplug if the Pi isn't reachable within ~2 min.
+
+### Remote wiring (board behind the screen, Pi on the desk)
+
+The FTS02's P1 is wired pin-for-pin like the Pi header, so a jumper bundle is
+pin N → pin N. Only these are needed (checked against gpiozero's Pi 4 header
+map), as physical pin numbers: 3V3 on 1 and 17; GND on 6, 20, 25; display
+MOSI 19, SCLK 23, CE0 24, RST 11, DC 22, BUSY 18; touch SDA 31, SCL 33, INT 35.
+Leave 5V (pins 2, 4) empty. Verified working over 20cm male-to-female jumpers.
+
+Don't extend the panel's own 24-pin ribbon to reach a distant board: it carries
+the boost converter's drive and sense lines, not just SPI. A 24-pin FPC
+extension board + FFC attempt (2026-10-02) gave a different reading on each try
+(BUSY floating, then low) and was followed by the display's power-up never
+completing even when plugged straight back into P5: the controller answers
+reset and accepts commands, but BUSY never releases after POWER ON. Measured
+during a power-up attempt: PREVGH stays at 3.28V (the supply passing through),
+PREVGL stays at 0V, and Q1's gate shows 0V — the boost is never being told to
+switch. That points at the panel's controller (or the GDR contact, P5 pin 2),
+not the FTS02's boost parts. A replacement GDEY075T7-T01 is on order;
+TODO(oli): if it also fails on the FTS02, try it on a Waveshare e-Paper Driver
+HAT to separate board from panel.
+
+Before trying any new display wiring:
+- **Disable `panel.service` first** (`sudo systemctl disable --now panel`).
+  Otherwise every boot starts the display through whatever is connected.
+- **Continuity-check every 24-pin joint with the power off.** "Contacts up, no
+  flips" reasoning wasn't enough — these extension connectors didn't behave as
+  predicted.
+- Then read BUSY before driving anything: idle **high** means the panel is
+  connected; floating or low means stop. The app now does this itself
+  (`require_idle_busy()` in `panel/display.py`) and exits instead of starting
+  the panel, so the service just retries every 15s until the wiring reads
+  right. It catches a missing or badly seated ribbon, not every possible
+  miswiring — the steps above still apply.

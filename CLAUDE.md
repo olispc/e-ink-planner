@@ -37,6 +37,12 @@ on both platforms, so a Mac dev preview renders identically to the Pi
 instead of each OS falling back to whatever it ships (DejaVu/Helvetica/
 Arial stay as a safety net after it).
 
+**Never start the panel on wiring that doesn't read right.** `epd.init()`
+runs the controller's boost converter (±20V on the drive lines), which a
+shifted or mirrored 24-pin ribbon delivers to 3.3V pins. `require_idle_busy()`
+resets the panel and refuses to start unless BUSY reads idle-high — keep it
+ahead of any new init path.
+
 **Never blank on failure.** The image persists with the power off, so a dead
 network must show the last good list *labelled offline*, not an empty screen or
 stale data with no explanation. `Panel.stale_since` is what does this.

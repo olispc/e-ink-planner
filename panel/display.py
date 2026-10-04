@@ -47,6 +47,31 @@ class PngDisplay(Display):
         print("wrote %s" % self.path)
 
 
+class DisplayWiringError(RuntimeError):
+    pass
+
+
+def require_idle_busy(cfg, epd) -> None:
+    """Refuse to start the panel unless BUSY reads idle-high after a reset.
+
+    epd.init() runs the controller's boost converter, which puts roughly ±20V
+    on the panel's drive lines. On a shifted or mirrored 24-pin ribbon those
+    land on pins built for 3.3V. A correctly connected, idle UC8179 holds BUSY
+    high once reset; floating (the driver's pull-down reads it low) or held low
+    means the ribbon isn't connected the way we think. A reset alone never
+    starts the boost, so this check is safe on any wiring.
+    """
+    cfg.digital_write(cfg.PWR_PIN, 1)  # Waveshare HAT Rev2.3 gates panel power here
+    cfg.delay_ms(50)
+    epd.reset()
+    if cfg.digital_read(epd.busy_pin) != 1:
+        cfg.digital_write(cfg.PWR_PIN, 0)
+        raise DisplayWiringError(
+            "e-paper BUSY not idle-high after reset: ribbon not connected as "
+            "expected, refusing to start the panel (see deploy/README.md)"
+        )
+
+
 class EPaperDisplay(Display):
     """Good Display GDEY075T7-T01 via Waveshare's UC8179 driver.
 
@@ -80,9 +105,10 @@ class EPaperDisplay(Display):
     FAST_PER_NORMAL = 3  # fast full refreshes between each normal one
 
     def __init__(self, fast: bool = True) -> None:
-        from waveshare_epd import epd7in5_V2  # noqa: WPS433 — Pi-only import
+        from waveshare_epd import epd7in5_V2, epdconfig  # noqa: WPS433 — Pi-only import
 
         self.epd = epd7in5_V2.EPD()
+        require_idle_busy(epdconfig, self.epd)
         # Startup always takes the thorough normal waveform, once: the panel
         # may be holding an image from before a crash or power cut.
         self.epd.init()

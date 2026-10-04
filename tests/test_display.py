@@ -7,7 +7,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from panel.display import EPaperDisplay  # noqa: E402
+from panel.display import DisplayWiringError, EPaperDisplay, require_idle_busy  # noqa: E402
 
 
 class FakeEPD:
@@ -88,6 +88,39 @@ class TestWaveformRotation(unittest.TestCase):
         for _ in range(4):
             d.show(None)
         self.assertNotIn("fast", d.epd.inits)
+
+
+class FakeConfig:
+    PWR_PIN = 18
+
+    def __init__(self, busy):
+        self.busy = busy
+        self.log = []
+
+    def digital_write(self, pin, value): self.log.append(("write", pin, value))
+    def digital_read(self, pin): return self.busy
+    def delay_ms(self, ms): pass
+
+
+class FakeResetEPD:
+    busy_pin = 24
+
+    def __init__(self, cfg): self.cfg = cfg
+    def reset(self): self.cfg.log.append("reset")
+
+
+class TestRequireIdleBusy(unittest.TestCase):
+    def test_idle_high_busy_lets_startup_proceed(self):
+        cfg = FakeConfig(busy=1)
+        require_idle_busy(cfg, FakeResetEPD(cfg))
+        self.assertEqual(cfg.log, [("write", 18, 1), "reset"])
+
+    def test_low_or_floating_busy_refuses_and_powers_back_off(self):
+        # Floating reads 0 through the driver's pull-down, same as held low.
+        cfg = FakeConfig(busy=0)
+        with self.assertRaises(DisplayWiringError):
+            require_idle_busy(cfg, FakeResetEPD(cfg))
+        self.assertEqual(cfg.log[-1], ("write", 18, 0))
 
 
 if __name__ == "__main__":
