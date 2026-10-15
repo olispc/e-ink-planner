@@ -206,5 +206,5 @@ doesn't depend on time-of-day.
 ## Where the detail lives
 
 - `deploy/README.md` — provisioning the Pi, sync server, overlay, wiring
-- `deploy/overlays/gt911-epaper.dts` — why touch needs a device-tree overlay
+- `deploy/overlays/` — why touch needs a device-tree overlay, one per touch chip
 - `panel/theme.py` — every layout number, and the physical reason for it

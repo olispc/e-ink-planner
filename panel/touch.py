@@ -1,7 +1,8 @@
-"""Touch input from the GT911, once the device-tree overlay is loaded.
+"""Touch input from the panel's touch chip, once its device-tree overlay is loaded.
 
-The overlay in deploy/overlays/ binds the mainline `goodix` driver to the chip,
-after which it is an ordinary evdev device — the same class of thing as a mouse.
+The overlay in deploy/overlays/ binds the mainline driver for that chip
+(`goodix` or `edt-ft5x06`), after which it is an ordinary evdev device — the
+same class of thing as a mouse.
 Nothing here talks I2C directly.
 """
 from __future__ import annotations
