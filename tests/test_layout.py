@@ -38,12 +38,12 @@ def item(n: int, completed: bool = False, title: str = None) -> ChecklistItem:
 
 
 # The header's own controls (home, focus-sticky, sort direction, area/
-# project/due toggles) are always present regardless of task content — real,
+# project/due toggles, dark mode, lock) are always present regardless of task content — real,
 # static hitboxes, not something tests should mistake for "the header has
 # nothing tappable".
 HEADER_CONTROL_KINDS = {
     "home", "focus_sticky", "sort_toggle", "toggle_project_view", "toggle_area_view",
-    "toggle_due_first",
+    "toggle_due_first", "toggle_dark", "toggle_lock",
 }
 
 
@@ -741,6 +741,65 @@ class TestDetailRendering(unittest.TestCase):
         long_toggle = next(b for b in with_long.hitboxes if b.kind == "toggle")
         capped_toggle = next(b for b in with_capped.hitboxes if b.kind == "toggle")
         self.assertEqual(long_toggle.y0, capped_toggle.y0)
+
+
+class TestHeaderCluster(unittest.TestCase):
+    def _header_boxes(self, view):
+        r = render([task(1)], view)
+        return [b for b in r.hitboxes if b.y1 <= HEADER_H]
+
+    def test_header_hitboxes_never_overlap_for_any_view_title(self):
+        from panel.layout import VIEW_TITLES
+        for view in VIEW_TITLES:
+            boxes = sorted(self._header_boxes(view), key=lambda b: b.x0)
+            for a, b in zip(boxes, boxes[1:]):
+                self.assertLessEqual(a.x1, b.x0, "%s: %s overlaps %s" % (view, a.kind, b.kind))
+
+    def test_dark_and_lock_controls_are_present_in_the_list_header(self):
+        kinds = {b.kind for b in self._header_boxes("next")}
+        self.assertIn("toggle_dark", kinds)
+        self.assertIn("toggle_lock", kinds)
+
+    def test_header_controls_stay_clear_of_the_updated_status(self):
+        # Rightmost control must end before the "updated" text, in
+        # the worst case (the widest date string). Pixels in that gap are blank.
+        r = render([task(1)], "next", now=datetime(2026, 12, 28, 9, 0))
+        lock = max((b for b in r.hitboxes if b.kind == "toggle_lock"), key=lambda b: b.x1)
+        gap = r.image.crop((lock.x1, 10, lock.x1 + 12, 54))
+        self.assertTrue(all(p == WHITE or p == 255 for p in gap.getdata()))
+
+    def test_dark_render_is_the_exact_inverse_with_identical_hitboxes(self):
+        tasks = [task(i) for i in range(3)]
+        light = render(tasks, "next", now=datetime(2026, 10, 15, 9, 0))
+        dark = render(tasks, "next", now=datetime(2026, 10, 15, 9, 0), dark=True)
+        self.assertEqual(light.hitboxes, dark.hitboxes)
+        self.assertEqual(dark.image.mode, "1")
+        # Everywhere except the dark button itself, whose border is heavier
+        # when on — that difference is the point, not an inversion error.
+        btn = next(h for h in light.hitboxes if h.kind == "toggle_dark")
+        lo, do = light.image.convert("L"), dark.image.convert("L")
+        for i, (a, b) in enumerate(zip(lo.getdata(), do.getdata())):
+            x, y = i % WIDTH, i // WIDTH
+            if btn.x0 <= x < btn.x1 and y < HEADER_H:
+                continue
+            self.assertEqual(a, 255 - b, "pixel (%d, %d)" % (x, y))
+
+    def test_detail_view_dark_is_inverted_too(self):
+        light = render_detail(task(1))
+        dark = render_detail(task(1), dark=True)
+        self.assertEqual(light.hitboxes, dark.hitboxes)
+        self.assertEqual(dark.image.getpixel((0, 0)), 0)
+
+    def test_locked_changes_only_the_lock_glyph_and_nothing_hittable(self):
+        a = render([task(1)], "next", now=datetime(2026, 10, 15, 9, 0))
+        b = render([task(1)], "next", now=datetime(2026, 10, 15, 9, 0), locked=True)
+        self.assertEqual(a.hitboxes, b.hitboxes)
+        lock = next(h for h in a.hitboxes if h.kind == "toggle_lock")
+        diff = [i for i, (p, q) in enumerate(zip(a.image.getdata(), b.image.getdata())) if p != q]
+        self.assertTrue(diff)
+        for i in diff:
+            x, y = i % WIDTH, i // WIDTH
+            self.assertTrue(lock.x0 <= x < lock.x1 and y < HEADER_H)
 
 
 if __name__ == "__main__":

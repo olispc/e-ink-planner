@@ -340,5 +340,94 @@ class TestHeaderControls(unittest.TestCase):
         self.assertTrue(panel.group_by_area)
 
 
+class TestDarkMode(unittest.TestCase):
+    def _tap(self, panel, kind):
+        box = next(b for b in panel.hitboxes if b.kind == kind)
+        panel.handle_tap((box.x0 + 5, box.y0 + 5))
+
+    def test_toggle_flips_and_redraws_inverted_without_losing_the_page(self):
+        panel = make_panel([task(i) for i in range(25)])
+        panel.refresh()
+        panel.draw(force=True)
+        forward = max((b for b in panel.hitboxes if b.kind == "list_page"), key=lambda b: b.x0)
+        panel.handle_tap((forward.x0 + 10, forward.y0 + 10))
+        page = panel.list_page
+        before = len(panel.display.shown)
+
+        self._tap(panel, "toggle_dark")
+        self.assertTrue(panel.dark)
+        self.assertEqual(panel.list_page, page)
+        self.assertEqual(len(panel.display.shown), before + 1)
+        # Page corner is margin, so it flips from white to black.
+        self.assertEqual(panel.display.shown[-1].getpixel((0, 0)), 0)
+
+        self._tap(panel, "toggle_dark")
+        self.assertFalse(panel.dark)
+        self.assertNotEqual(panel.display.shown[-1].getpixel((0, 0)), 0)
+
+    def test_detail_view_follows_dark_mode(self):
+        panel = make_panel([task(1, title="One")])
+        panel.refresh()
+        panel.draw(force=True)
+        self._tap(panel, "toggle_dark")
+        box = next(b for b in panel.hitboxes if b.kind == "open")
+        panel.handle_tap((box.x0 + 5, box.y0 + 5))
+        self.assertEqual(panel.mode, "detail")
+        self.assertEqual(panel.display.shown[-1].getpixel((0, 0)), 0)
+
+
+class TestScreenLock(unittest.TestCase):
+    def _panel(self, n=25):
+        panel = make_panel([task(i) for i in range(n)])
+        panel.refresh()
+        panel.draw(force=True)
+        return panel
+
+    def _tap(self, panel, kind):
+        box = next(b for b in panel.hitboxes if b.kind == kind)
+        panel.handle_tap((box.x0 + 5, box.y0 + 5))
+
+    def test_locked_ignores_every_other_target(self):
+        panel = self._panel()
+        self._tap(panel, "toggle_lock")
+        self.assertTrue(panel.locked)
+        shown = len(panel.display.shown)
+
+        for kind in ("complete", "open", "star", "list_page", "home", "sort_toggle",
+                     "focus_sticky", "toggle_area_view", "toggle_project_view",
+                     "toggle_due_first", "toggle_dark"):
+            self._tap(panel, kind)
+        self.assertEqual(len(panel.tasks), 25)            # nothing completed
+        self.assertFalse(any(t.focused for t in panel.tasks))
+        self.assertEqual((panel.mode, panel.list_page), ("list", 0))
+        self.assertTrue(panel.sort_newest is False and panel.focus_sticky is True)
+        self.assertFalse(panel.dark)
+        self.assertEqual(len(panel.display.shown), shown)  # and nothing redrawn
+
+    def test_locked_ignores_swipes_and_taps_on_empty_space(self):
+        panel = self._panel()
+        self._tap(panel, "toggle_lock")
+        panel.handle_gesture(Gesture("swipe", 600, 200, dx=-300))
+        panel.handle_gesture(Gesture("tap", 400, 20))
+        self.assertEqual(panel.list_page, 0)
+
+    def test_lock_button_unlocks_and_input_resumes(self):
+        panel = self._panel()
+        self._tap(panel, "toggle_lock")
+        self._tap(panel, "toggle_lock")
+        self.assertFalse(panel.locked)
+        self._tap(panel, "sort_toggle")
+        self.assertTrue(panel.sort_newest)
+
+    def test_background_refresh_still_updates_while_locked(self):
+        panel = self._panel(3)
+        self._tap(panel, "toggle_lock")
+        panel.client.tasks = panel.client.tasks[:2]
+        panel.refresh()
+        panel.draw(partial=True)
+        self.assertEqual(len(panel.tasks), 2)
+        self.assertTrue(any(b.kind == "toggle_lock" for b in panel.hitboxes))
+
+
 if __name__ == "__main__":
     unittest.main()

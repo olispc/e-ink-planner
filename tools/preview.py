@@ -52,6 +52,8 @@ def main() -> int:
     ap.add_argument("--view", default=None, help="next | inbox | waiting | someday | focus")
     ap.add_argument("--fixture", type=Path, default=FIXTURE)
     ap.add_argument("--out", type=Path, default=Path("local/preview.png"))
+    ap.add_argument("--dark", action="store_true", help="dark mode (inverted)")
+    ap.add_argument("--locked", action="store_true", help="draw the lock as engaged")
     ap.add_argument("--scale", type=int, default=1, help="upscale for screen viewing")
     args = ap.parse_args()
 
@@ -63,7 +65,7 @@ def main() -> int:
     else:
         tasks = from_fixture(args.fixture)
 
-    image = render(tasks, view, total=len(tasks)).image
+    image = render(tasks, view, total=len(tasks), dark=args.dark, locked=args.locked).image
     if args.scale > 1:
         image = image.convert("L").resize(
             (image.width * args.scale, image.height * args.scale)

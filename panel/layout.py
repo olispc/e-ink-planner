@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Optional, Sequence, Tuple
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageOps
 
 from .client import Task
 from .theme import (
@@ -20,7 +20,7 @@ from .theme import (
     DETAIL_STAR_ZONE_W, FOCUS_STAR_SIZE, FOOTER_H,
     GROUP_HEADER_H, GROUP_ICON_SIZE, GROUP_TOGGLE_BOX, HEADER_H, HEIGHT,
     LIST_TEXT_RIGHT, MARGIN, PAGER_BOX, PAGER_H, ROW_H, ROWS, SORT_ARROW_SIZE, STAR_SIZE,
-    STAR_ZONE_W, SYNC_ICON_SIZE, TEXT_RIGHT, TEXT_X, WHITE, WIDTH, fonts,
+    STAR_ZONE_W, TEXT_RIGHT, TEXT_X, WHITE, WIDTH, fonts,
 )
 
 VIEW_TITLES = {
@@ -57,6 +57,9 @@ class Hitbox:
     - "toggle_area_view"  — flip area grouping
     - "toggle_project_view" — flip project grouping
     - "toggle_due_first"  — flip whether due-dated backlog tasks lead
+    - "toggle_dark"       — flip dark mode (whole screen inverted)
+    - "toggle_lock"       — flip the touch lock; the only thing a tap does
+                            while locked
     """
     kind: str
     x0: int
@@ -262,26 +265,6 @@ def _draw_layers_icon(d: ImageDraw.ImageDraw, x0: int, y0: int, size: int) -> No
         )
 
 
-def _draw_sync_icon(d: ImageDraw.ImageDraw, cx: int, cy: int, size: int) -> None:
-    """Small refresh glyph next to the header's "updated HH:MM" — an
-    open arc with one arrowhead, the standard sync-icon shorthand."""
-    r = size / 2
-    d.arc([cx - r, cy - r, cx + r, cy + r], start=25, end=290, fill=BLACK, width=2)
-    angle = math.radians(25)
-    tip = (cx + r * math.cos(angle), cy + r * math.sin(angle))
-    # Arrowhead scales with the arc — fixed pixel offsets here (tuned for an
-    # 18px icon) swallowed a 12px one into an unrecognizable blob.
-    s = r / 9.0
-    d.polygon(
-        [
-            (tip[0] - 4 * s, tip[1] - 1 * s),
-            (tip[0] + 1 * s, tip[1] - 5 * s),
-            (tip[0] + 3 * s, tip[1] + 3 * s),
-        ],
-        fill=BLACK,
-    )
-
-
 def _draw_calendar_icon(d: ImageDraw.ImageDraw, x0: float, y0: float, size: float) -> None:
     """A minimal calendar glyph — bordered body, a header band, two binding
     rings — for the due-date-first header toggle."""
@@ -293,9 +276,35 @@ def _draw_calendar_icon(d: ImageDraw.ImageDraw, x0: float, y0: float, size: floa
         d.line([(rx, y0), (rx, top + band_h * 0.5)], fill=BLACK, width=2)
 
 
+def _draw_contrast_icon(d: ImageDraw.ImageDraw, x0: float, y0: float, size: float) -> None:
+    """The standard light/dark glyph — a circle with its right half filled —
+    for the dark-mode header toggle. Same shape whichever mode is active; the
+    box's border weight says whether it's on."""
+    box = [x0, y0, x0 + size, y0 + size]
+    d.ellipse(box, outline=BLACK, width=2)
+    d.pieslice(box, start=-90, end=90, fill=BLACK)
+
+
+def _draw_lock_icon(d: ImageDraw.ImageDraw, x0: float, y0: float, size: float, locked: bool) -> None:
+    """Padlock for the touch-lock toggle: solid body, shackle above it.
+    Locked, the shackle drops into the body on both sides; unlocked, it is
+    lifted clear with its right leg free — so the glyph itself changes, not
+    only the border around it."""
+    body_top = y0 + size * 0.45
+    d.rectangle([x0 + size * 0.08, body_top, x0 + size * 0.92, y0 + size], fill=BLACK)
+    left, right = x0 + size * 0.28, x0 + size * 0.72
+    lift = 0 if locked else size * 0.22
+    arc_top, arc_bottom = y0 - lift, y0 + size * 0.7 - lift
+    d.arc([left, arc_top, right, arc_bottom], start=180, end=360, fill=BLACK, width=2)
+    mid_y = (arc_top + arc_bottom) / 2
+    d.line([(left, mid_y), (left, body_top)], fill=BLACK, width=2)
+    if locked:
+        d.line([(right, mid_y), (right, body_top)], fill=BLACK, width=2)
+
+
 def _draw_toggle_box(d: ImageDraw.ImageDraw, x0: int, y0: int, size: int, icon: str, on: bool) -> None:
-    """Small icon box for a view toggle (project/area grouping, due-date-
-    first) — same heavier-border-means-on language as a focused task's
+    """Small icon box for a header toggle (project/area grouping, due-date-
+    first, dark mode, touch lock) — same heavier-border-means-on language as a focused task's
     checkbox, so a new control doesn't need a new visual vocabulary."""
     d.rectangle([x0, y0, x0 + size, y0 + size], outline=BLACK, width=3 if on else 1)
     icon_size = GROUP_ICON_SIZE
@@ -305,6 +314,10 @@ def _draw_toggle_box(d: ImageDraw.ImageDraw, x0: int, y0: int, size: int, icon: 
         _draw_folder_icon(d, ix, iy, icon_size)
     elif icon == "due":
         _draw_calendar_icon(d, ix, iy, icon_size)
+    elif icon == "dark":
+        _draw_contrast_icon(d, ix, y0 + (size - icon_size) / 2, icon_size)
+    elif icon == "lock":
+        _draw_lock_icon(d, ix, y0 + (size - icon_size) / 2 + 1, icon_size, on)
     else:
         _draw_layers_icon(d, ix, iy, icon_size)
 
@@ -593,6 +606,17 @@ def _paginate(entries: List[tuple], available_h: int, pager_h: int) -> Tuple[Lis
     return pages or [[]], True
 
 
+def _finish(img: Image.Image, hitboxes: List[Hitbox], dark: bool) -> Rendered:
+    """Dark mode is the finished light render inverted, not a second set of
+    colours threaded through every draw call: the layout, hitboxes and glyphs
+    stay identical, so the two modes can't drift apart. Inverting 1-bit pixels
+    is lossless (no antialiasing to mangle). Via "L" because this module's
+    WHITE is 1, not 255, which PIL's own invert on mode "1" gets wrong."""
+    if dark:
+        img = ImageOps.invert(img.convert("L")).convert("1", dither=Image.Dither.NONE)
+    return Rendered(image=img, hitboxes=hitboxes)
+
+
 def render(
     tasks: Sequence[Task],
     view: str,
@@ -607,6 +631,8 @@ def render(
     group_by_project: bool = False,
     due_first: bool = False,
     group_order: Optional[dict] = None,
+    dark: bool = False,
+    locked: bool = False,
 ) -> Rendered:
     now = now or datetime.now()
     f = fonts()
@@ -638,38 +664,34 @@ def render(
     # are deliberately untouched by it — the header controls below are the
     # only way to change them, so a stray tap here can't reset a view you
     # set up on purpose.
-    hitboxes: List[Hitbox] = [Hitbox("home", 0, MARGIN + _text_width(d, title_text, f.header) + 16, 0, HEADER_H)]
+    # The cluster's left edge is fixed, so the longest title ("NEXT ACTIONS")
+    # would otherwise reach under the first control — clamp home to end there.
+    star_cx, arrow_cx = 212, 246
+    home_x1 = min(MARGIN + _text_width(d, title_text, f.header) + 16, star_cx - 16)
+    hitboxes: List[Hitbox] = [Hitbox("home", 0, home_x1, 0, HEADER_H)]
 
     ctrl_y = 30
 
     right = now.strftime("%a %-d %b")
-    # In the focus view the useful number is what you chose for today, not the
-    # size of the backlog underneath it.
-    headline = sum(1 for t in all_tasks if t.focused) if view == "focus" else total
-    if headline:
-        right = "%d  ·  %s" % (headline, right)
     date_x = TEXT_RIGHT - _text_width(d, right, f.header_right)
     d.text((date_x, 21), right, font=f.header_right, fill=BLACK)
 
     # Routine status — "updated HH:MM" plus how much wasn't even fetched —
     # sits right-aligned next to the date, grouped with it as read-only status
     # text rather than with the star/arrow/toggle cluster below: those are the
-    # only things on this header a tap actually changes, and a smaller icon
-    # plus footer-sized text keeps this from reading as a 5th control.
+    # only things on this header a tap actually changes, and footer-sized text
+    # keeps this from reading as another control.
     updated_text = "updated %s" % now.strftime("%H:%M")
     not_fetched = total - len(all_tasks)
     if not_fetched > 0:
         updated_text += "  ·  %d more" % not_fetched
     updated_text_x = date_x - 30 - _text_width(d, updated_text, f.footer)
-    sync_cx = updated_text_x - SYNC_ICON_SIZE / 2 - 6
-    _draw_sync_icon(d, sync_cx, ctrl_y, SYNC_ICON_SIZE)
     d.text((updated_text_x, ctrl_y - 6), updated_text, font=f.footer, fill=BLACK)
 
     # --- header controls: focus-sticky, sort direction, area/project -------
     # Anchored to fixed positions rather than relative to the (variable-
     # width) title or date text, so neither can ever collide with this
     # cluster regardless of which view's title or how long "N more" runs.
-    star_cx, arrow_cx = 235, 275
     _draw_star(d, star_cx, ctrl_y, FOCUS_STAR_SIZE, filled=focus_sticky)
     hitboxes.append(Hitbox("focus_sticky", star_cx - 16, star_cx + 16, 0, HEADER_H))
     # One button, not two: with focus_sticky handling "important first"
@@ -678,7 +700,7 @@ def render(
     _draw_arrow(d, arrow_cx, ctrl_y, SORT_ARROW_SIZE, up=sort_newest)
     hitboxes.append(Hitbox("sort_toggle", arrow_cx - 16, arrow_cx + 16, 0, HEADER_H))
 
-    area_x, proj_x = 305, 305 + GROUP_TOGGLE_BOX + 8
+    area_x, proj_x = 276, 276 + GROUP_TOGGLE_BOX + 8
     cal_x = proj_x + GROUP_TOGGLE_BOX + 8
     box_y = ctrl_y - GROUP_TOGGLE_BOX // 2
     _draw_toggle_box(d, area_x, box_y, GROUP_TOGGLE_BOX, "area", group_by_area)
@@ -692,6 +714,18 @@ def render(
     )
     hitboxes.append(
         Hitbox("toggle_due_first", cal_x - 4, cal_x + GROUP_TOGGLE_BOX + 4, 0, HEADER_H)
+    )
+    # Display and input controls, after the view controls: they change how
+    # the panel looks / whether it listens, not what the list contains.
+    dark_x = cal_x + GROUP_TOGGLE_BOX + 8
+    lock_x = dark_x + GROUP_TOGGLE_BOX + 8
+    _draw_toggle_box(d, dark_x, box_y, GROUP_TOGGLE_BOX, "dark", dark)
+    _draw_toggle_box(d, lock_x, box_y, GROUP_TOGGLE_BOX, "lock", locked)
+    hitboxes.append(
+        Hitbox("toggle_dark", dark_x - 4, dark_x + GROUP_TOGGLE_BOX + 4, 0, HEADER_H)
+    )
+    hitboxes.append(
+        Hitbox("toggle_lock", lock_x - 4, lock_x + GROUP_TOGGLE_BOX + 4, 0, HEADER_H)
     )
 
     d.line([(MARGIN, HEADER_H - 8), (TEXT_RIGHT, HEADER_H - 8)], fill=BLACK, width=2)
@@ -828,12 +862,12 @@ def render(
         warn = "OFFLINE since %s" % stale_since.strftime("%H:%M")
         d.text((MARGIN, fy + 14), warn, font=f.footer, fill=BLACK)
 
-    return Rendered(image=img, hitboxes=hitboxes)
+    return _finish(img, hitboxes, dark)
 
 
 def render_detail(
     task: Task, completing: bool = False, expanded: bool = False, page: int = 0,
-    now: Optional[datetime] = None,
+    now: Optional[datetime] = None, dark: bool = False,
 ) -> Rendered:
     """One task, full title, and its checklist if it has one.
 
@@ -1015,7 +1049,7 @@ def render_detail(
             font=f.footer, fill=BLACK,
         )
 
-    return Rendered(image=img, hitboxes=hitboxes)
+    return _finish(img, hitboxes, dark)
 
 
 def hit(hitboxes: Sequence[Hitbox], point: Tuple[int, int]) -> Optional[Hitbox]:

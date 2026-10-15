@@ -109,7 +109,7 @@ one paginated in full while the other gets crowded to zero.
 **The header holds real controls, not just a title.** Tapping the view title
 is "home" (list page back to 0 — the toggles below are deliberately left
 alone, since a stray tap on the title shouldn't undo a view you set up on
-purpose). Five toggles live in a fixed-position cluster at header-center,
+purpose). Seven toggles live in a fixed-position cluster at header-center,
 anchored there rather than relative to the (variable-width) title or date
 text so neither can ever collide with it:
 - **focus-sticky** (star) — whether starred-today tasks pin to the top ahead
@@ -133,6 +133,20 @@ text so neither can ever collide with it:
   `_sort_backlog()` is what due-first changes, and the focus-sticky leading
   section always sorts through plain `_sort_by_date` instead, so a starred
   task never gets bumped by an unstarred one with a nearer due date.
+- **dark mode** (half-filled circle) — the finished light render inverted
+  (`_finish()` in layout.py), not a second palette threaded through every
+  draw call, so layout, hitboxes and glyphs cannot drift between the two
+  modes. Inversion goes via mode `"L"` because `WHITE` is 1 here and PIL's own
+  invert on mode `"1"` leaves stray bits. Applies to the detail view too, and
+  is a partial refresh like every other update — a whole-screen polarity flip
+  is the case most likely to ghost, so if it does on the real panel, make this
+  one toggle take the full-refresh path rather than loosening the rule above.
+- **screen lock** (padlock, open/closed glyph) — while locked, the lock button
+  is the only live tap target and swipes are dropped; the single gate is the
+  top of `Panel.handle_tap`, keyed on `box.kind`, so a new control can't
+  forget to check. The button lives in the list header only, so a locked panel
+  is always on the list view. Background refreshes still draw while locked.
+  In-memory like the other toggles: a restart unlocks and returns to light.
 
 **Focus-sticky always wins when it's on** — starred-today tasks form their
 own flat leading section, sorted by `sort_newest` but never bucketed by
@@ -156,11 +170,11 @@ it until a header toggle or the home tap drops it; groups that appear in
 between go after the known ones. Tasks within a group need no freezing —
 removing one never reorders the rest.
 
-**Header status text is not a 5th control.** "updated HH:MM" plus a small
-sync glyph sits next to the date on the right — deliberately smaller (footer
-font, a 12px icon vs. the controls' 20px) and grouped with the read-only
-date/count instead of the tappable cluster, so it reads as status, not
-another toggle.
+**Header status text is not a control.** "updated HH:MM" sits next to the
+date on the right — deliberately smaller (footer font vs. the controls' 20px
+icons) and grouped with the read-only date instead of the tappable cluster, so
+it reads as status, not another toggle. No sync glyph and no task count: both
+were spending header width on things the list itself already shows.
 
 **Checklist writes are whole-array, not per-item.** Mindwtr's schema (verified
 against `packages/core/src/task-sync-schema.ts`) has no per-item toggle route

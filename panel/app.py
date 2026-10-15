@@ -66,6 +66,13 @@ class Panel:
         # soonest due first — never touches the focus-sticky leading
         # section, which stays exempt as "the starred list" regardless.
         self.due_first: bool = False
+        # Display and input state, both in-memory like the toggles above.
+        # `dark` inverts the whole render. `locked` makes every tap except
+        # the lock button's own a no-op — for wiping the glass or a child's
+        # curious hand. The lock button lives in the list view's header, so
+        # a locked panel is always on the list view (nothing can leave it).
+        self.dark: bool = False
+        self.locked: bool = False
         # Frozen group order (see layout.compute_group_order): taken lazily
         # on the first grouped draw, dropped whenever the user changes a
         # toggle or taps home, so completing/starring tasks never reshuffles
@@ -113,11 +120,11 @@ class Panel:
             task = self._find(self.detail_task_id)
             if task is None:
                 return ("detail-missing", self.detail_task_id)
-            return ("detail", task, self.checklist_expanded, self.checklist_page)
+            return ("detail", task, self.checklist_expanded, self.checklist_page, self.dark)
         return (
             "list", tuple(self.tasks), self.list_page,
             self.sort_newest, self.focus_sticky, self.group_by_area, self.group_by_project,
-            self.due_first, self.stale_since is not None,
+            self.due_first, self.stale_since is not None, self.dark, self.locked,
         )
 
     # -- output -----------------------------------------------------------
@@ -135,6 +142,7 @@ class Panel:
             rendered = render_detail(
                 self._find(self.detail_task_id),
                 expanded=self.checklist_expanded, page=self.checklist_page,
+                dark=self.dark,
             )
         else:
             rendered = render(
@@ -149,6 +157,7 @@ class Panel:
                 group_by_project=self.group_by_project,
                 due_first=self.due_first,
                 group_order=self._frozen_group_order(),
+                dark=self.dark, locked=self.locked,
             )
         if partial:
             self.display.show_partial(rendered.image)
@@ -160,6 +169,8 @@ class Panel:
     # -- interaction ------------------------------------------------------
     def handle_gesture(self, gesture) -> None:
         if gesture.kind == "swipe":
+            if self.locked:
+                return
             self.handle_swipe(gesture.dx)
         else:
             self.handle_tap((gesture.x, gesture.y))
@@ -178,6 +189,11 @@ class Panel:
     def handle_tap(self, point) -> None:
         box = hit(getattr(self, "hitboxes", []), point)
         if box is None:
+            return
+        # The one gate for touch input: locked, the lock button is the only
+        # live target — everything else (rows, pagers, other toggles) falls
+        # through to nothing, so no future box kind can forget to check.
+        if self.locked and box.kind != "toggle_lock":
             return
         if box.kind == "back":
             self.mode, self.detail_task_id = "list", None
@@ -233,6 +249,14 @@ class Panel:
             self._group_order = None
             self.list_page = 0
             self.draw(force=True, partial=True)
+        elif box.kind == "toggle_dark":
+            # Same content, same page — only the polarity changes, so no
+            # page or group-order reset like the view toggles above.
+            self.dark = not self.dark
+            self.draw(force=True, partial=True)
+        elif box.kind == "toggle_lock":
+            self.locked = not self.locked
+            self.draw(force=True, partial=True)
 
     def _complete_task(self, task_id: str) -> None:
         task = self._find(task_id)
@@ -270,6 +294,7 @@ class Panel:
             rendered = render_detail(
                 task, completing=True,
                 expanded=self.checklist_expanded, page=self.checklist_page,
+                dark=self.dark,
             )
         else:
             rendered = render(
@@ -279,6 +304,7 @@ class Panel:
                 group_by_area=self.group_by_area, group_by_project=self.group_by_project,
                 due_first=self.due_first,
                 group_order=self._frozen_group_order(),
+                dark=self.dark, locked=self.locked,
             )
         self.display.show_partial(rendered.image)
         self.hitboxes = rendered.hitboxes

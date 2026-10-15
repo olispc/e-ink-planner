@@ -75,8 +75,6 @@ FOCUS_STAR_SIZE = 20           # header-scale — smaller than a row's own star
 SORT_ARROW_SIZE = 20           # one button, shows whichever direction is on
 GROUP_TOGGLE_BOX = 28          # small icon boxes, heavier border when on
 GROUP_ICON_SIZE = 16           # the folder/layers icon drawn inside those
-SYNC_ICON_SIZE = 12            # deliberately smaller than the 20px controls —
-                               # "updated HH:MM" is status, not a 5th toggle
 
 # A group divider (area or project name) is half a task row — organizational
 # text, not a tappable item, so it doesn't need a task row's full height.
