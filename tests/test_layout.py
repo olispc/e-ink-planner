@@ -534,10 +534,17 @@ class TestDetailRendering(unittest.TestCase):
         rendered = render_detail(task(1))
         self.assertEqual([b for b in rendered.hitboxes if b.kind == "toggle"], [])
 
-    def test_header_tap_goes_back(self):
+    def test_header_title_goes_back(self):
         rendered = render_detail(task(1))
-        box = hit(rendered.hitboxes, (400, 20))
+        box = hit(rendered.hitboxes, (20, 20))
         self.assertEqual(box.kind, "back")
+
+    def test_header_keeps_the_list_controls(self):
+        # The whole bar stays: same control hitboxes as the list's, so lock,
+        # dark and the view toggles are reachable without leaving the task.
+        detail = {b.kind for b in render_detail(task(1)).hitboxes if b.y0 == 0}
+        listing = {b.kind for b in render([task(1)], "next").hitboxes if b.y0 == 0}
+        self.assertEqual(detail, (listing - {"home"}) | {"back"})
 
     def test_title_checkbox_completes_the_task(self):
         rendered = render_detail(task(1))

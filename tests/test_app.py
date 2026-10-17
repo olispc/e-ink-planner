@@ -428,6 +428,32 @@ class TestScreenLock(unittest.TestCase):
         self.assertEqual(len(panel.tasks), 2)
         self.assertTrue(any(b.kind == "toggle_lock" for b in panel.hitboxes))
 
+    def test_detail_view_keeps_the_header_and_can_lock_and_unlock(self):
+        panel = self._panel(3)
+        self._tap(panel, "open")
+        self.assertEqual(panel.mode, "detail")
+
+        self._tap(panel, "toggle_lock")
+        self.assertTrue(panel.locked)
+        self.assertEqual(panel.mode, "detail")
+        self._tap(panel, "back")                  # gated like everything else
+        self.assertEqual(panel.mode, "detail")
+
+        self._tap(panel, "toggle_lock")
+        self._tap(panel, "back")
+        self.assertEqual(panel.mode, "list")
+
+    def test_detail_header_toggles_redraw_and_carry_back_to_the_list(self):
+        panel = self._panel(3)
+        self._tap(panel, "open")
+        shown = len(panel.display.shown)
+        self._tap(panel, "sort_toggle")
+        self.assertTrue(panel.sort_newest)
+        self.assertEqual(panel.mode, "detail")
+        self.assertEqual(len(panel.display.shown), shown + 1)  # icon state changed
+        self._tap(panel, "back")
+        self.assertTrue(panel.sort_newest)
+
 
 if __name__ == "__main__":
     unittest.main()

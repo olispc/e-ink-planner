@@ -69,8 +69,9 @@ class Panel:
         # Display and input state, both in-memory like the toggles above.
         # `dark` inverts the whole render. `locked` makes every tap except
         # the lock button's own a no-op — for wiping the glass or a child's
-        # curious hand. The lock button lives in the list view's header, so
-        # a locked panel is always on the list view (nothing can leave it).
+        # curious hand. The header (lock included) is on both views, so a
+        # panel can be locked while showing a task's detail; unlocking is
+        # always one tap away, and "back" is blocked like everything else.
         self.dark: bool = False
         self.locked: bool = False
         # Frozen group order (see layout.compute_group_order): taken lazily
@@ -108,6 +109,14 @@ class Panel:
             return None
         return next((t for t in self.tasks if t.id == task_id), None)
 
+    def _header_state(self) -> dict:
+        """The toggle state both views draw in their shared header bar."""
+        return dict(
+            sort_newest=self.sort_newest, focus_sticky=self.focus_sticky,
+            group_by_area=self.group_by_area, group_by_project=self.group_by_project,
+            due_first=self.due_first, dark=self.dark, locked=self.locked,
+        )
+
     def _signature(self) -> tuple:
         # The actual Task objects, not a hand-picked subset of their fields —
         # a signature built from e.g. (id, title, focused) alone silently
@@ -120,7 +129,10 @@ class Panel:
             task = self._find(self.detail_task_id)
             if task is None:
                 return ("detail-missing", self.detail_task_id)
-            return ("detail", task, self.checklist_expanded, self.checklist_page, self.dark)
+            return (
+                "detail", task, self.checklist_expanded, self.checklist_page,
+                tuple(sorted(self._header_state().items())),
+            )
         return (
             "list", tuple(self.tasks), self.list_page,
             self.sort_newest, self.focus_sticky, self.group_by_area, self.group_by_project,
@@ -142,7 +154,7 @@ class Panel:
             rendered = render_detail(
                 self._find(self.detail_task_id),
                 expanded=self.checklist_expanded, page=self.checklist_page,
-                dark=self.dark,
+                **self._header_state(),
             )
         else:
             rendered = render(
@@ -151,13 +163,8 @@ class Panel:
                 total=len(self.tasks),
                 stale_since=self.stale_since,
                 page=self.list_page,
-                sort_newest=self.sort_newest,
-                focus_sticky=self.focus_sticky,
-                group_by_area=self.group_by_area,
-                group_by_project=self.group_by_project,
-                due_first=self.due_first,
                 group_order=self._frozen_group_order(),
-                dark=self.dark, locked=self.locked,
+                **self._header_state(),
             )
         if partial:
             self.display.show_partial(rendered.image)
@@ -294,17 +301,14 @@ class Panel:
             rendered = render_detail(
                 task, completing=True,
                 expanded=self.checklist_expanded, page=self.checklist_page,
-                dark=self.dark,
+                **self._header_state(),
             )
         else:
             rendered = render(
                 self.tasks, self.config.view, total=len(self.tasks),
                 stale_since=self.stale_since, completing=task.id, page=self.list_page,
-                sort_newest=self.sort_newest, focus_sticky=self.focus_sticky,
-                group_by_area=self.group_by_area, group_by_project=self.group_by_project,
-                due_first=self.due_first,
                 group_order=self._frozen_group_order(),
-                dark=self.dark, locked=self.locked,
+                **self._header_state(),
             )
         self.display.show_partial(rendered.image)
         self.hitboxes = rendered.hitboxes

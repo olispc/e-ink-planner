@@ -78,6 +78,28 @@ has the FT5426.
 Finally `cp .env.example ../.env`, set `PANEL_DISPLAY=epaper` and
 `PANEL_TOUCH=evdev`, and install `panel.service`.
 
+## Deploying a code change
+
+The Pi runs `panel.service` from `~/e-ink-planner-dev`, a plain copy rather than
+a git checkout (it also holds the real `.env`, which must never be overwritten).
+Reach it with `ssh pi` (Tailscale; host config in `~/.ssh/config`). Code gets
+there by rsync, then a service restart:
+
+```bash
+python3 -m pytest -q                                           # tests first
+rsync -rnci --exclude __pycache__ panel/ pi:e-ink-planner-dev/panel/   # dry run: only expected files?
+rsync -ci <the changed files> pi:e-ink-planner-dev/panel/      # copy just those
+ssh pi 'cd ~/e-ink-planner-dev && python3 -m py_compile panel/*.py \
+  && sudo -n systemctl restart panel && sleep 8 \
+  && systemctl is-active panel && journalctl -u panel --no-pager -n 15 --since "-30s"'
+```
+
+Sync only changed files, never `--delete` and never the repo root (`.env` lives
+there on the Pi). A healthy restart logs `full refresh (fast) … after 0
+partials` within a few seconds. An `Exception in thread Thread-1` line from the
+*old* process as it stops has been seen once and looked harmless (traceback not
+logged, new process started clean) — not root-caused.
+
 ## Wiring
 
 The adapter that arrived is Good Display's **ESP32-FTS02** (ordered as the

@@ -617,48 +617,27 @@ def _finish(img: Image.Image, hitboxes: List[Hitbox], dark: bool) -> Rendered:
     return Rendered(image=img, hitboxes=hitboxes)
 
 
-def render(
-    tasks: Sequence[Task],
-    view: str,
-    total: Optional[int] = None,
-    now: Optional[datetime] = None,
-    stale_since: Optional[datetime] = None,
-    completing: Optional[str] = None,
-    page: int = 0,
+def _draw_header(
+    d: ImageDraw.ImageDraw,
+    now: datetime,
+    title_text: str,
+    title_kind: str,
+    not_fetched: int = 0,
     sort_newest: bool = False,
     focus_sticky: bool = True,
     group_by_area: bool = False,
     group_by_project: bool = False,
     due_first: bool = False,
-    group_order: Optional[dict] = None,
     dark: bool = False,
     locked: bool = False,
-) -> Rendered:
-    now = now or datetime.now()
+) -> List[Hitbox]:
+    """The control bar, shared by the list and the detail view so the two can't
+    drift apart (and so the lock and dark toggles are reachable from either).
+    `title_kind` is what a tap on the title does: "home" in the list, "back"
+    in the detail view. The cluster and status text are the same in both —
+    the view toggles don't change what a detail view shows, but they're the
+    state the list will have when you go back, so they stay live."""
     f = fonts()
-    img = Image.new("1", (WIDTH, HEIGHT), WHITE)
-    d = ImageDraw.Draw(img)
-
-    all_tasks = list(tasks)
-    total = len(all_tasks) if total is None else total
-
-    entries, allow_boundary = _organize_tasks(
-        all_tasks, sort_newest, focus_sticky, group_by_area, group_by_project, due_first,
-        group_order=group_order,
-    )
-    # The footer only has something to say when offline — otherwise it's
-    # dead space "updated HH:MM" (now in the header, see below) used to
-    # spend on every single render. Collapsing it to a bare rule when
-    # online gives that back to pagination/grouping headroom.
-    footer_h = FOOTER_H if stale_since is not None else COLLAPSED_FOOTER_H
-    available_h = HEIGHT - HEADER_H - footer_h
-    pages, needs_paging = _paginate(entries, available_h, PAGER_H)
-    total_pages = len(pages)
-    page = max(0, min(page, total_pages - 1))
-    visible = pages[page]
-
-    # --- header: title/home, small controls, then date -----------------------
-    title_text = VIEW_TITLES.get(view, view.upper())
     d.text((MARGIN, 20), title_text, font=f.header, fill=BLACK)
     # Tapping the title is "home": back to page 1. Sort/group/sticky toggles
     # are deliberately untouched by it — the header controls below are the
@@ -668,7 +647,7 @@ def render(
     # would otherwise reach under the first control — clamp home to end there.
     star_cx, arrow_cx = 212, 246
     home_x1 = min(MARGIN + _text_width(d, title_text, f.header) + 16, star_cx - 16)
-    hitboxes: List[Hitbox] = [Hitbox("home", 0, home_x1, 0, HEADER_H)]
+    hitboxes: List[Hitbox] = [Hitbox(title_kind, 0, home_x1, 0, HEADER_H)]
 
     ctrl_y = 30
 
@@ -682,7 +661,6 @@ def render(
     # only things on this header a tap actually changes, and footer-sized text
     # keeps this from reading as another control.
     updated_text = "updated %s" % now.strftime("%H:%M")
-    not_fetched = total - len(all_tasks)
     if not_fetched > 0:
         updated_text += "  ·  %d more" % not_fetched
     updated_text_x = date_x - 30 - _text_width(d, updated_text, f.footer)
@@ -729,6 +707,57 @@ def render(
     )
 
     d.line([(MARGIN, HEADER_H - 8), (TEXT_RIGHT, HEADER_H - 8)], fill=BLACK, width=2)
+    return hitboxes
+
+
+def render(
+    tasks: Sequence[Task],
+    view: str,
+    total: Optional[int] = None,
+    now: Optional[datetime] = None,
+    stale_since: Optional[datetime] = None,
+    completing: Optional[str] = None,
+    page: int = 0,
+    sort_newest: bool = False,
+    focus_sticky: bool = True,
+    group_by_area: bool = False,
+    group_by_project: bool = False,
+    due_first: bool = False,
+    group_order: Optional[dict] = None,
+    dark: bool = False,
+    locked: bool = False,
+) -> Rendered:
+    now = now or datetime.now()
+    f = fonts()
+    img = Image.new("1", (WIDTH, HEIGHT), WHITE)
+    d = ImageDraw.Draw(img)
+
+    all_tasks = list(tasks)
+    total = len(all_tasks) if total is None else total
+
+    entries, allow_boundary = _organize_tasks(
+        all_tasks, sort_newest, focus_sticky, group_by_area, group_by_project, due_first,
+        group_order=group_order,
+    )
+    # The footer only has something to say when offline — otherwise it's
+    # dead space "updated HH:MM" (now in the header, see below) used to
+    # spend on every single render. Collapsing it to a bare rule when
+    # online gives that back to pagination/grouping headroom.
+    footer_h = FOOTER_H if stale_since is not None else COLLAPSED_FOOTER_H
+    available_h = HEIGHT - HEADER_H - footer_h
+    pages, needs_paging = _paginate(entries, available_h, PAGER_H)
+    total_pages = len(pages)
+    page = max(0, min(page, total_pages - 1))
+    visible = pages[page]
+
+    # --- header: shared with the detail view (see _draw_header) -------------
+    hitboxes = _draw_header(
+        d, now, VIEW_TITLES.get(view, view.upper()), "home",
+        not_fetched=total - len(all_tasks),
+        sort_newest=sort_newest, focus_sticky=focus_sticky,
+        group_by_area=group_by_area, group_by_project=group_by_project,
+        due_first=due_first, dark=dark, locked=locked,
+    )
 
     # --- rows -----------------------------------------------------------
     if not visible:
@@ -867,7 +896,9 @@ def render(
 
 def render_detail(
     task: Task, completing: bool = False, expanded: bool = False, page: int = 0,
-    now: Optional[datetime] = None, dark: bool = False,
+    now: Optional[datetime] = None, dark: bool = False, locked: bool = False,
+    sort_newest: bool = False, focus_sticky: bool = True, group_by_area: bool = False,
+    group_by_project: bool = False, due_first: bool = False,
 ) -> Rendered:
     """One task, full title, and its checklist if it has one.
 
@@ -888,12 +919,14 @@ def render_detail(
     f = fonts()
     img = Image.new("1", (WIDTH, HEIGHT), WHITE)
     d = ImageDraw.Draw(img)
-    hitboxes: List[Hitbox] = []
 
-    # --- header: "back" replaces the view title/count in this mode --------
-    d.text((MARGIN, 20), "< BACK", font=f.header, fill=BLACK)
-    d.line([(MARGIN, HEADER_H - 8), (TEXT_RIGHT, HEADER_H - 8)], fill=BLACK, width=2)
-    hitboxes.append(Hitbox("back", 0, WIDTH, 0, HEADER_H))
+    # --- header: the same bar as the list, "< BACK" in place of the title ---
+    hitboxes: List[Hitbox] = _draw_header(
+        d, now, "< BACK", "back",
+        sort_newest=sort_newest, focus_sticky=focus_sticky,
+        group_by_area=group_by_area, group_by_project=group_by_project,
+        due_first=due_first, dark=dark, locked=locked,
+    )
 
     # --- title + the task's own checkbox and star ---------------------------
     y = HEADER_H + 14

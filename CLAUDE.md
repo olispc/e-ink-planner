@@ -106,7 +106,13 @@ its own pager: only one pager fits on screen, and a task with both a long
 description and a long checklist needs a guaranteed minimum of *each*, not
 one paginated in full while the other gets crowded to zero.
 
-**The header holds real controls, not just a title.** Tapping the view title
+**The header holds real controls, not just a title — and it is the same bar
+on the list and the detail view.** `_draw_header()` draws both (title tap is
+"home" in the list, "back" in detail; everything right of it is identical), so
+lock and dark mode are reachable without leaving a task and the two bars can't
+drift apart. The view toggles still apply to the list you return to.
+
+In the list, tapping the view title
 is "home" (list page back to 0 — the toggles below are deliberately left
 alone, since a stray tap on the title shouldn't undo a view you set up on
 purpose). Seven toggles live in a fixed-position cluster at header-center,
@@ -144,8 +150,8 @@ text so neither can ever collide with it:
 - **screen lock** (padlock, open/closed glyph) — while locked, the lock button
   is the only live tap target and swipes are dropped; the single gate is the
   top of `Panel.handle_tap`, keyed on `box.kind`, so a new control can't
-  forget to check. The button lives in the list header only, so a locked panel
-  is always on the list view. Background refreshes still draw while locked.
+  forget to check — "back" included, so a panel locked on a task's detail view
+  stays there until unlocked. Background refreshes still draw while locked.
   In-memory like the other toggles: a restart unlocks and returns to light.
 
 **Focus-sticky always wins when it's on** — starred-today tasks form their
