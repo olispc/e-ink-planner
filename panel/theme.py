@@ -6,6 +6,7 @@ roughly 12.6 mm — comfortably past the ~9 mm minimum for a reliable thumb tap.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -85,6 +86,36 @@ GROUP_HEADER_H = ROW_H // 2
 # full height for the OFFLINE warning, which is the one thing this app
 # promises never to make hard to notice.
 COLLAPSED_FOOTER_H = 10
+
+# Portrait is the same UI drawn on a 480x800 canvas that the display layer then
+# turns onto the panel's native 800x480 (see panel/rotation.py). Its header is
+# two rows — title/status on top, the seven controls spread across the full
+# width beneath — because the single landscape row is built for 800px.
+PORTRAIT_HEADER_H = 112
+PORTRAIT_HEADER_ROW_H = 56    # the title/status row; controls fill the rest
+
+
+@dataclass(frozen=True)
+class Geometry:
+    """The canvas a render draws on. Everything that used to read WIDTH/HEIGHT/
+    HEADER_H/TEXT_RIGHT straight from this module reads it from here, so
+    landscape and portrait share one layout path."""
+    width: int
+    height: int
+    header_h: int
+    portrait: bool = False
+
+    @property
+    def text_right(self) -> int:
+        return self.width - MARGIN
+
+    @property
+    def list_text_right(self) -> int:
+        return self.text_right - STAR_ZONE_W
+
+
+LANDSCAPE = Geometry(WIDTH, HEIGHT, HEADER_H)
+PORTRAIT = Geometry(HEIGHT, WIDTH, PORTRAIT_HEADER_H, portrait=True)
 
 BLACK, WHITE = 0, 1           # mode "1" pixel values
 

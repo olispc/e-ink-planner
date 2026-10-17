@@ -78,6 +78,18 @@ has the FT5426.
 Finally `cp .env.example ../.env`, set `PANEL_DISPLAY=epaper` and
 `PANEL_TOUCH=evdev`, and install `panel.service`.
 
+If the panel is mounted sideways, tap the **rotate** button in the header (the
+circular arrow). It toggles landscape ↔ portrait (the UI turned 90°
+clockwise, so the panel is mounted turned anticlockwise to read it upright), with
+a full refresh, and the choice is saved to `local/state.json` in the app directory
+on the Pi, so restarts and deploys keep it (`rsync` of `panel/` never touches
+it). It wins over `PANEL_ROTATION` in `.env`, which is just the starting
+orientation; delete the file to hand control back to `.env`. If the panel ends
+up mounted the other way (turned clockwise), set `PANEL_ROTATION=90` and
+delete the saved file — the button only toggles 0 ↔ 270. Touch follows the
+rotation; confirm a corner tap still lands right (`PANEL_TOUCH_DEBUG=1` prints
+each stroke).
+
 ## Deploying a code change
 
 The Pi runs `panel.service` from `~/e-ink-planner-dev`, a plain copy rather than
@@ -97,8 +109,8 @@ ssh pi 'cd ~/e-ink-planner-dev && python3 -m py_compile panel/*.py \
 Sync only changed files, never `--delete` and never the repo root (`.env` lives
 there on the Pi). A healthy restart logs `full refresh (fast) … after 0
 partials` within a few seconds. An `Exception in thread Thread-1` line from the
-*old* process as it stops has been seen once and looked harmless (traceback not
-logged, new process started clean) — not root-caused.
+*old* process as it stops has appeared on every restart so far and looked
+harmless (traceback not logged, new process started clean) — not root-caused.
 
 ## Wiring
 

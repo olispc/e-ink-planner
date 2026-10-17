@@ -44,7 +44,7 @@ def item(n: int, completed: bool = False, title: str = None) -> ChecklistItem:
 # nothing tappable".
 HEADER_CONTROL_KINDS = {
     "home", "focus_sticky", "sort_toggle", "toggle_project_view", "toggle_area_view",
-    "toggle_due_first", "toggle_dark", "toggle_lock",
+    "toggle_due_first", "toggle_dark", "toggle_lock", "toggle_rotate",
 }
 
 
@@ -786,8 +786,8 @@ class TestHeaderCluster(unittest.TestCase):
         # Rightmost control must end before the "updated" text, in
         # the worst case (the widest date string). Pixels in that gap are blank.
         r = render([task(1)], "next", now=datetime(2026, 12, 28, 9, 0))
-        lock = max((b for b in r.hitboxes if b.kind == "toggle_lock"), key=lambda b: b.x1)
-        gap = r.image.crop((lock.x1, 10, lock.x1 + 12, 54))
+        rightmost = next(b for b in r.hitboxes if b.kind == "toggle_rotate")
+        gap = r.image.crop((rightmost.x1, 10, rightmost.x1 + 12, 54))
         self.assertTrue(all(p == WHITE or p == 255 for p in gap.getdata()))
 
     def test_dark_render_is_the_exact_inverse_with_identical_hitboxes(self):
@@ -822,6 +822,78 @@ class TestHeaderCluster(unittest.TestCase):
         for i in diff:
             x, y = i % WIDTH, i // WIDTH
             self.assertTrue(lock.x0 <= x < lock.x1 and y < HEADER_H)
+
+
+
+class TestPortrait(unittest.TestCase):
+    """480x800: the same UI on a taller canvas, with a two-row header."""
+
+    CONTROLS = {"focus_sticky", "sort_toggle", "toggle_area_view", "toggle_project_view",
+                "toggle_due_first", "toggle_dark", "toggle_lock", "toggle_rotate"}
+
+    def tasks(self, n=14):
+        return [task(i, title="Task %d" % i) for i in range(n)]
+
+    def test_canvas_is_480_by_800_one_bit(self):
+        for rendered in (render(self.tasks(), "next", portrait=True),
+                         render_detail(task(1), portrait=True)):
+            self.assertEqual(rendered.image.size, (480, 800))
+            self.assertEqual(rendered.image.mode, "1")
+
+    def test_list_shows_more_rows_than_landscape(self):
+        def rows(portrait):
+            r = render(self.tasks(), "next", portrait=portrait)
+            return len([b for b in r.hitboxes if b.kind == "open"])
+        self.assertEqual(rows(False), 6)
+        self.assertGreaterEqual(rows(True), 10)
+
+    def test_the_header_has_the_same_eight_controls_as_landscape(self):
+        for rendered in (render(self.tasks(), "next", portrait=True),
+                         render_detail(task(1), portrait=True)):
+            kinds = {b.kind for b in rendered.hitboxes if b.y0 < 112}
+            self.assertEqual(kinds & self.CONTROLS, self.CONTROLS)
+
+    def test_controls_are_big_equal_slots_that_do_not_overlap_the_title_row(self):
+        rendered = render(self.tasks(), "next", portrait=True)
+        controls = sorted((b for b in rendered.hitboxes if b.kind in self.CONTROLS), key=lambda b: b.x0)
+        self.assertEqual(len(controls), 8)
+        for a, b in zip(controls, controls[1:]):
+            self.assertLessEqual(a.x1, b.x0)           # no overlap
+        for b in controls:
+            self.assertGreaterEqual(b.x1 - b.x0, 50)   # a real thumb target
+            self.assertGreaterEqual(b.y0, 56)          # below the title row
+        title = next(b for b in rendered.hitboxes if b.kind == "home")
+        self.assertLessEqual(title.y1, 56)
+
+    def test_every_hitbox_stays_on_the_canvas(self):
+        for rendered in (render(self.tasks(), "next", portrait=True),
+                         render(self.tasks(), "next", portrait=True, group_by_project=True),
+                         render_detail(task(1, checklist=[item(n) for n in range(30)]), portrait=True)):
+            for b in rendered.hitboxes:
+                self.assertTrue(0 <= b.x0 < b.x1 <= 480 and 0 <= b.y0 < b.y1 <= 800, b)
+
+    def test_longest_title_does_not_reach_the_status_text(self):
+        # "NEXT ACTIONS" is the widest title; its tap zone must stop before
+        # the "updated" text rather than run under it.
+        rendered = render(self.tasks(), "next", portrait=True)
+        title = next(b for b in rendered.hitboxes if b.kind == "home")
+        self.assertLess(title.x1, 300)
+
+    def test_detail_checklist_fits_more_items(self):
+        r = render_detail(task(1, checklist=[item(n) for n in range(30)]), portrait=True)
+        self.assertGreater(len([b for b in r.hitboxes if b.kind == "toggle"]), 6)
+
+    def test_taps_land_on_the_rows_that_were_drawn(self):
+        rendered = render(self.tasks(), "next", portrait=True)
+        box = next(b for b in rendered.hitboxes if b.kind == "open" and b.task_id == "task-3")
+        found = hit(rendered.hitboxes, ((box.x0 + box.x1) // 2, (box.y0 + box.y1) // 2))
+        self.assertEqual((found.kind, found.task_id), ("open", "task-3"))
+
+    def test_dark_portrait_is_the_inverted_light_render(self):
+        light = render(self.tasks(), "next", portrait=True).image
+        dark = render(self.tasks(), "next", portrait=True, dark=True).image
+        self.assertEqual(dark.getpixel((0, 0)), 0)
+        self.assertNotEqual(light.getpixel((0, 0)), 0)
 
 
 if __name__ == "__main__":

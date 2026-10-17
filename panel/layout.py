@@ -18,9 +18,8 @@ from .theme import (
     BLACK, BOX, BOX_X, COLLAPSED_FOOTER_H, DETAIL_BOX, DETAIL_BOX_Y_OFFSET,
     DETAIL_DESC_LINE_H, DETAIL_DESC_MIN_LINES_WITH_CHECKLIST, DETAIL_ROW_H,
     DETAIL_STAR_ZONE_W, FOCUS_STAR_SIZE, FOOTER_H,
-    GROUP_HEADER_H, GROUP_ICON_SIZE, GROUP_TOGGLE_BOX, HEADER_H, HEIGHT,
-    LIST_TEXT_RIGHT, MARGIN, PAGER_BOX, PAGER_H, ROW_H, ROWS, SORT_ARROW_SIZE, STAR_SIZE,
-    STAR_ZONE_W, TEXT_RIGHT, TEXT_X, WHITE, WIDTH, fonts,
+    GROUP_HEADER_H, GROUP_ICON_SIZE, GROUP_TOGGLE_BOX, MARGIN, PAGER_BOX, PAGER_H, ROW_H, ROWS, SORT_ARROW_SIZE, STAR_SIZE,
+    LANDSCAPE, PORTRAIT, PORTRAIT_HEADER_ROW_H, STAR_ZONE_W, TEXT_X, WHITE, Geometry, fonts,
 )
 
 VIEW_TITLES = {
@@ -60,6 +59,7 @@ class Hitbox:
     - "toggle_dark"       — flip dark mode (whole screen inverted)
     - "toggle_lock"       — flip the touch lock; the only thing a tap does
                             while locked
+    - "toggle_rotate"     — flip between landscape and portrait (full refresh)
     """
     kind: str
     x0: int
@@ -181,7 +181,7 @@ def _draw_disclosure(d: ImageDraw.ImageDraw, x0: int, y0: int, size: int, direct
 
 
 def _draw_detail_pager(
-    d: ImageDraw.ImageDraw, y0: int, y1: int, page: int, total_pages: int, task_id: str
+    d: ImageDraw.ImageDraw, g: Geometry, y0: int, y1: int, page: int, total_pages: int, task_id: str
 ) -> List[Hitbox]:
     """The detail view's bidirectional "page X/Y" row — split left/right
     into independent previous/next zones, each wrapping at its own end.
@@ -191,17 +191,17 @@ def _draw_detail_pager(
     f = fonts()
     box_y = y0 + (y1 - y0 - DETAIL_BOX) // 2
     text_y = y0 + (y1 - y0 - 20) // 2
-    mid = WIDTH // 2
+    mid = g.width // 2
     prev_page = (page - 1) % total_pages
     next_page = (page + 1) % total_pages
     hitboxes = [
         Hitbox("page", 0, mid, y0, y1, task_id=task_id, page=prev_page),
-        Hitbox("page", mid, WIDTH, y0, y1, task_id=task_id, page=next_page),
+        Hitbox("page", mid, g.width, y0, y1, task_id=task_id, page=next_page),
     ]
     _draw_disclosure(d, BOX_X, box_y, DETAIL_BOX, direction="left")
-    _draw_disclosure(d, TEXT_RIGHT - DETAIL_BOX, box_y, DETAIL_BOX, direction="right")
+    _draw_disclosure(d, g.text_right - DETAIL_BOX, box_y, DETAIL_BOX, direction="right")
     label = "page %d/%d" % (page + 1, total_pages)
-    d.text(((WIDTH - _text_width(d, label, f.meta)) // 2, text_y), label, font=f.meta, fill=BLACK)
+    d.text(((g.width - _text_width(d, label, f.meta)) // 2, text_y), label, font=f.meta, fill=BLACK)
     return hitboxes
 
 
@@ -302,10 +302,29 @@ def _draw_lock_icon(d: ImageDraw.ImageDraw, x0: float, y0: float, size: float, l
         d.line([(right, mid_y), (right, body_top)], fill=BLACK, width=2)
 
 
+def _draw_rotate_icon(d: ImageDraw.ImageDraw, x0: float, y0: float, size: float) -> None:
+    """A circular arrow — an almost-full circle with a head at its open end —
+    for the rotate button. One glyph for every orientation; the box's border
+    weight says whether the panel is turned from its native landscape."""
+    cx, cy, r = x0 + size / 2, y0 + size / 2, size / 2
+    end = 315  # degrees, clockwise from 3 o'clock; the gap is the arrow's mouth
+    d.arc([x0, y0, x0 + size, y0 + size], start=25, end=end, fill=BLACK, width=2)
+    th = math.radians(end)
+    ex, ey = cx + r * math.cos(th), cy + r * math.sin(th)
+    tx, ty = -math.sin(th), math.cos(th)     # direction of travel at the end
+    nx, ny = math.cos(th), math.sin(th)      # outward from the circle
+    d.polygon(
+        [(ex + tx * 5, ey + ty * 5), (ex - tx * 1 + nx * 4.5, ey - ty * 1 + ny * 4.5),
+         (ex - tx * 1 - nx * 4.5, ey - ty * 1 - ny * 4.5)],
+        fill=BLACK,
+    )
+
+
 def _draw_toggle_box(d: ImageDraw.ImageDraw, x0: int, y0: int, size: int, icon: str, on: bool) -> None:
     """Small icon box for a header toggle (project/area grouping, due-date-
-    first, dark mode, touch lock) — same heavier-border-means-on language as a focused task's
-    checkbox, so a new control doesn't need a new visual vocabulary."""
+    first, dark mode, touch lock, rotate) — same heavier-border-means-on
+    language as a focused task's checkbox, so a new control doesn't need a new
+    visual vocabulary."""
     d.rectangle([x0, y0, x0 + size, y0 + size], outline=BLACK, width=3 if on else 1)
     icon_size = GROUP_ICON_SIZE
     ix = x0 + (size - icon_size) / 2
@@ -318,6 +337,8 @@ def _draw_toggle_box(d: ImageDraw.ImageDraw, x0: int, y0: int, size: int, icon: 
         _draw_contrast_icon(d, ix, y0 + (size - icon_size) / 2, icon_size)
     elif icon == "lock":
         _draw_lock_icon(d, ix, y0 + (size - icon_size) / 2 + 1, icon_size, on)
+    elif icon == "rotate":
+        _draw_rotate_icon(d, ix, y0 + (size - icon_size) / 2, icon_size)
     else:
         _draw_layers_icon(d, ix, iy, icon_size)
 
@@ -619,6 +640,7 @@ def _finish(img: Image.Image, hitboxes: List[Hitbox], dark: bool) -> Rendered:
 
 def _draw_header(
     d: ImageDraw.ImageDraw,
+    g: Geometry,
     now: datetime,
     title_text: str,
     title_kind: str,
@@ -630,83 +652,92 @@ def _draw_header(
     due_first: bool = False,
     dark: bool = False,
     locked: bool = False,
+    rotation: int = 0,
 ) -> List[Hitbox]:
     """The control bar, shared by the list and the detail view so the two can't
     drift apart (and so the lock and dark toggles are reachable from either).
     `title_kind` is what a tap on the title does: "home" in the list, "back"
     in the detail view. The cluster and status text are the same in both —
     the view toggles don't change what a detail view shows, but they're the
-    state the list will have when you go back, so they stay live."""
+    state the list will have when you go back, so they stay live.
+
+    Landscape is one row: title, then the eight controls at fixed positions,
+    then status and date. Portrait (480px wide) can't fit that, so it is two:
+    title / status / date on top and the eight controls spread across the full
+    width beneath, one equal slot each — larger tap targets than landscape's.
+    The controls are the same eight in the same order either way."""
     f = fonts()
     d.text((MARGIN, 20), title_text, font=f.header, fill=BLACK)
-    # Tapping the title is "home": back to page 1. Sort/group/sticky toggles
-    # are deliberately untouched by it — the header controls below are the
-    # only way to change them, so a stray tap here can't reset a view you
-    # set up on purpose.
-    # The cluster's left edge is fixed, so the longest title ("NEXT ACTIONS")
-    # would otherwise reach under the first control — clamp home to end there.
-    star_cx, arrow_cx = 212, 246
-    home_x1 = min(MARGIN + _text_width(d, title_text, f.header) + 16, star_cx - 16)
-    hitboxes: List[Hitbox] = [Hitbox(title_kind, 0, home_x1, 0, HEADER_H)]
+    title_w = _text_width(d, title_text, f.header)
 
-    ctrl_y = 30
-
-    right = now.strftime("%a %-d %b")
-    date_x = TEXT_RIGHT - _text_width(d, right, f.header_right)
+    # Short on purpose ("Sat 17", "upd 10:16"): the header's width is the scarce
+    # thing, and the weekday + day is what a wall planner is glanced at for.
+    right = now.strftime("%a %-d")
+    date_x = g.text_right - _text_width(d, right, f.header_right)
     d.text((date_x, 21), right, font=f.header_right, fill=BLACK)
 
     # Routine status — "updated HH:MM" plus how much wasn't even fetched —
     # sits right-aligned next to the date, grouped with it as read-only status
-    # text rather than with the star/arrow/toggle cluster below: those are the
-    # only things on this header a tap actually changes, and footer-sized text
-    # keeps this from reading as another control.
-    updated_text = "updated %s" % now.strftime("%H:%M")
+    # text rather than with the controls: those are the only things on this
+    # header a tap actually changes, and footer-sized text keeps this from
+    # reading as another control.
+    updated_text = "upd %s" % now.strftime("%H:%M")
     if not_fetched > 0:
         updated_text += "  ·  %d more" % not_fetched
-    updated_text_x = date_x - 30 - _text_width(d, updated_text, f.footer)
-    d.text((updated_text_x, ctrl_y - 6), updated_text, font=f.footer, fill=BLACK)
+    updated_text_x = date_x - (16 if g.portrait else 30) - _text_width(d, updated_text, f.footer)
+    d.text((updated_text_x, 24), updated_text, font=f.footer, fill=BLACK)
 
-    # --- header controls: focus-sticky, sort direction, area/project -------
-    # Anchored to fixed positions rather than relative to the (variable-
-    # width) title or date text, so neither can ever collide with this
-    # cluster regardless of which view's title or how long "N more" runs.
-    _draw_star(d, star_cx, ctrl_y, FOCUS_STAR_SIZE, filled=focus_sticky)
-    hitboxes.append(Hitbox("focus_sticky", star_cx - 16, star_cx + 16, 0, HEADER_H))
+    # Control positions as (centre x, half hit-width), in order: focus-sticky,
+    # sort, area, project, due, dark, lock, rotate. Landscape's are fixed absolute
+    # positions rather than relative to the (variable-width) title or date, so
+    # neither can ever collide with the cluster; portrait's are equal slots.
+    if g.portrait:
+        slot = (g.text_right - MARGIN) / 8
+        controls = [(int(MARGIN + slot * (i + 0.5)), int(slot // 2)) for i in range(8)]
+        ctrl_y = PORTRAIT_HEADER_ROW_H + (g.header_h - 8 - PORTRAIT_HEADER_ROW_H) // 2
+        hit_y0, title_y1 = PORTRAIT_HEADER_ROW_H, PORTRAIT_HEADER_ROW_H
+        home_x1 = min(MARGIN + title_w + 16, updated_text_x - 8)
+    else:
+        step = GROUP_TOGGLE_BOX + 8
+        centres = [212, 246] + [276 + step * i + GROUP_TOGGLE_BOX // 2 for i in range(6)]
+        controls = [(c, 16 if i < 2 else GROUP_TOGGLE_BOX // 2 + 4) for i, c in enumerate(centres)]
+        ctrl_y = 30
+        hit_y0, title_y1 = 0, g.header_h
+        # The cluster's left edge is fixed, so the longest title ("NEXT
+        # ACTIONS") would otherwise reach under the first control — clamp
+        # the title's tap zone to end there.
+        home_x1 = min(MARGIN + title_w + 16, controls[0][0] - 16)
+    # Tapping the title is "home": back to page 1. Sort/group/sticky toggles
+    # are deliberately untouched by it — the controls are the only way to
+    # change them, so a stray tap here can't reset a view you set up on purpose.
+    hitboxes: List[Hitbox] = [Hitbox(title_kind, 0, home_x1, 0, title_y1)]
+
+    (star_c, star_hw), (arrow_c, arrow_hw), *boxes = controls
+    _draw_star(d, star_c, ctrl_y, FOCUS_STAR_SIZE, filled=focus_sticky)
     # One button, not two: with focus_sticky handling "important first"
     # separately, sort has nothing a third "unsorted" state would mean —
     # newest-first draws up, oldest-first draws down, tap flips it.
-    _draw_arrow(d, arrow_cx, ctrl_y, SORT_ARROW_SIZE, up=sort_newest)
-    hitboxes.append(Hitbox("sort_toggle", arrow_cx - 16, arrow_cx + 16, 0, HEADER_H))
+    _draw_arrow(d, arrow_c, ctrl_y, SORT_ARROW_SIZE, up=sort_newest)
+    hitboxes.append(Hitbox("focus_sticky", star_c - star_hw, star_c + star_hw, hit_y0, g.header_h))
+    hitboxes.append(Hitbox("sort_toggle", arrow_c - arrow_hw, arrow_c + arrow_hw, hit_y0, g.header_h))
 
-    area_x, proj_x = 276, 276 + GROUP_TOGGLE_BOX + 8
-    cal_x = proj_x + GROUP_TOGGLE_BOX + 8
+    # View controls (area / project / due) first, then display and input
+    # (dark / lock / rotate): the latter change how the panel looks and whether
+    # it listens, not what the list contains. Rotate's border is heavy whenever
+    # the panel is turned from native landscape, like any other "on".
     box_y = ctrl_y - GROUP_TOGGLE_BOX // 2
-    _draw_toggle_box(d, area_x, box_y, GROUP_TOGGLE_BOX, "area", group_by_area)
-    _draw_toggle_box(d, proj_x, box_y, GROUP_TOGGLE_BOX, "project", group_by_project)
-    _draw_toggle_box(d, cal_x, box_y, GROUP_TOGGLE_BOX, "due", due_first)
-    hitboxes.append(
-        Hitbox("toggle_area_view", area_x - 4, area_x + GROUP_TOGGLE_BOX + 4, 0, HEADER_H)
-    )
-    hitboxes.append(
-        Hitbox("toggle_project_view", proj_x - 4, proj_x + GROUP_TOGGLE_BOX + 4, 0, HEADER_H)
-    )
-    hitboxes.append(
-        Hitbox("toggle_due_first", cal_x - 4, cal_x + GROUP_TOGGLE_BOX + 4, 0, HEADER_H)
-    )
-    # Display and input controls, after the view controls: they change how
-    # the panel looks / whether it listens, not what the list contains.
-    dark_x = cal_x + GROUP_TOGGLE_BOX + 8
-    lock_x = dark_x + GROUP_TOGGLE_BOX + 8
-    _draw_toggle_box(d, dark_x, box_y, GROUP_TOGGLE_BOX, "dark", dark)
-    _draw_toggle_box(d, lock_x, box_y, GROUP_TOGGLE_BOX, "lock", locked)
-    hitboxes.append(
-        Hitbox("toggle_dark", dark_x - 4, dark_x + GROUP_TOGGLE_BOX + 4, 0, HEADER_H)
-    )
-    hitboxes.append(
-        Hitbox("toggle_lock", lock_x - 4, lock_x + GROUP_TOGGLE_BOX + 4, 0, HEADER_H)
-    )
+    for (cx, hw), (icon, on, kind) in zip(boxes, [
+        ("area", group_by_area, "toggle_area_view"),
+        ("project", group_by_project, "toggle_project_view"),
+        ("due", due_first, "toggle_due_first"),
+        ("dark", dark, "toggle_dark"),
+        ("lock", locked, "toggle_lock"),
+        ("rotate", rotation != 0, "toggle_rotate"),
+    ]):
+        _draw_toggle_box(d, cx - GROUP_TOGGLE_BOX // 2, box_y, GROUP_TOGGLE_BOX, icon, on)
+        hitboxes.append(Hitbox(kind, cx - hw, cx + hw, hit_y0, g.header_h))
 
-    d.line([(MARGIN, HEADER_H - 8), (TEXT_RIGHT, HEADER_H - 8)], fill=BLACK, width=2)
+    d.line([(MARGIN, g.header_h - 8), (g.text_right, g.header_h - 8)], fill=BLACK, width=2)
     return hitboxes
 
 
@@ -726,10 +757,13 @@ def render(
     group_order: Optional[dict] = None,
     dark: bool = False,
     locked: bool = False,
+    portrait: bool = False,
+    rotation: int = 0,
 ) -> Rendered:
+    g = PORTRAIT if portrait else LANDSCAPE
     now = now or datetime.now()
     f = fonts()
-    img = Image.new("1", (WIDTH, HEIGHT), WHITE)
+    img = Image.new("1", (g.width, g.height), WHITE)
     d = ImageDraw.Draw(img)
 
     all_tasks = list(tasks)
@@ -744,7 +778,7 @@ def render(
     # spend on every single render. Collapsing it to a bare rule when
     # online gives that back to pagination/grouping headroom.
     footer_h = FOOTER_H if stale_since is not None else COLLAPSED_FOOTER_H
-    available_h = HEIGHT - HEADER_H - footer_h
+    available_h = g.height - g.header_h - footer_h
     pages, needs_paging = _paginate(entries, available_h, PAGER_H)
     total_pages = len(pages)
     page = max(0, min(page, total_pages - 1))
@@ -752,22 +786,22 @@ def render(
 
     # --- header: shared with the detail view (see _draw_header) -------------
     hitboxes = _draw_header(
-        d, now, VIEW_TITLES.get(view, view.upper()), "home",
+        d, g, now, VIEW_TITLES.get(view, view.upper()), "home",
         not_fetched=total - len(all_tasks),
         sort_newest=sort_newest, focus_sticky=focus_sticky,
         group_by_area=group_by_area, group_by_project=group_by_project,
-        due_first=due_first, dark=dark, locked=locked,
+        due_first=due_first, dark=dark, locked=locked, rotation=rotation,
     )
 
     # --- rows -----------------------------------------------------------
     if not visible:
         message = EMPTY_MESSAGES.get(view, "Nothing here.")
         d.text(
-            ((WIDTH - _text_width(d, message, f.empty)) // 2, HEIGHT // 2 - 24),
+            ((g.width - _text_width(d, message, f.empty)) // 2, g.height // 2 - 24),
             message, font=f.empty, fill=BLACK,
         )
-    star_x0 = WIDTH - STAR_ZONE_W
-    y = HEADER_H
+    star_x0 = g.width - STAR_ZONE_W
+    y = g.header_h
     # Global offset of `visible`'s first entry within the full `entries`
     # list — needed so the boundary rule below can look one entry past the
     # end of THIS page, into the next one, rather than only within what's
@@ -788,7 +822,7 @@ def render(
                 _draw_folder_icon(d, MARGIN + icon_size + 6, icon_y, icon_size)
             text_x = MARGIN + (icon_size * 2 + 12 if icon == "both" else icon_size + 8)
             d.text((text_x, y + 6), label, font=f.meta, fill=BLACK)
-            d.line([(MARGIN, y + h), (TEXT_RIGHT, y + h)], fill=BLACK, width=1)
+            d.line([(MARGIN, y + h), (g.text_right, y + h)], fill=BLACK, width=1)
             y += h
             continue
 
@@ -801,7 +835,7 @@ def render(
         # there's no gesture left on the other two zones to overload safely.
         hitboxes.append(Hitbox("complete", 0, TEXT_X, y0, y1, task_id=task.id))
         hitboxes.append(Hitbox("open", TEXT_X, star_x0, y0, y1, task_id=task.id))
-        hitboxes.append(Hitbox("star", star_x0, WIDTH, y0, y1, task_id=task.id))
+        hitboxes.append(Hitbox("star", star_x0, g.width, y0, y1, task_id=task.id))
 
         box_y = y0 + (ROW_H - BOX) // 2
         # Emphasis is a heavier border, never a fill: a filled checkbox reads as
@@ -811,7 +845,7 @@ def render(
             [BOX_X, box_y, BOX_X + BOX, box_y + BOX],
             outline=BLACK, width=4 if task.focused else 2,
         )
-        _draw_star(d, (star_x0 + WIDTH) // 2, y0 + ROW_H // 2, STAR_SIZE, filled=task.focused)
+        _draw_star(d, (star_x0 + g.width) // 2, y0 + ROW_H // 2, STAR_SIZE, filled=task.focused)
 
         # Only a task actually sitting under a group header (in_group) has
         # its project/area already stated above it — the leading focused
@@ -824,7 +858,7 @@ def render(
             task, now,
         )
         title_y = y0 + (12 if meta else 20)
-        title_text_row = _ellipsize(d, task.title, f.title, LIST_TEXT_RIGHT - TEXT_X)
+        title_text_row = _ellipsize(d, task.title, f.title, g.list_text_right - TEXT_X)
         d.text((TEXT_X, title_y), title_text_row, font=f.title, fill=BLACK)
         if task.id == completing:
             # Held for one beat before the row is dropped and the list
@@ -835,7 +869,7 @@ def render(
         if meta:
             d.text(
                 (TEXT_X, title_y + 30),
-                _ellipsize(d, meta, f.meta, LIST_TEXT_RIGHT - TEXT_X),
+                _ellipsize(d, meta, f.meta, g.list_text_right - TEXT_X),
                 font=f.meta, fill=BLACK,
             )
         if i < len(visible) - 1 or needs_paging:
@@ -854,14 +888,14 @@ def render(
                 and task.focused and not next_still_focused
             )
             d.line(
-                [(MARGIN if boundary else TEXT_X, y1), (TEXT_RIGHT, y1)],
+                [(MARGIN if boundary else TEXT_X, y1), (g.text_right, y1)],
                 fill=BLACK, width=2 if boundary else 1,
             )
         y += ROW_H
 
     if needs_paging:
         y0, y1 = y, y + PAGER_H
-        mid = WIDTH // 2
+        mid = g.width // 2
         prev_page = (page - 1) % total_pages
         next_page = (page + 1) % total_pages
         # Split the row itself rather than adding a second row — screen
@@ -869,13 +903,13 @@ def render(
         # which is what lets 6 tasks fit above it; swiping is the other
         # way to turn a page.
         hitboxes.append(Hitbox("list_page", 0, mid, y0, y1, page=prev_page))
-        hitboxes.append(Hitbox("list_page", mid, WIDTH, y0, y1, page=next_page))
+        hitboxes.append(Hitbox("list_page", mid, g.width, y0, y1, page=next_page))
         box_y = y0 + (PAGER_H - PAGER_BOX) // 2
         _draw_disclosure(d, BOX_X, box_y, PAGER_BOX, direction="left")
-        _draw_disclosure(d, WIDTH - MARGIN - PAGER_BOX, box_y, PAGER_BOX, direction="right")
+        _draw_disclosure(d, g.width - MARGIN - PAGER_BOX, box_y, PAGER_BOX, direction="right")
         label = "page %d/%d" % (page + 1, total_pages)
         d.text(
-            ((WIDTH - _text_width(d, label, f.meta)) // 2, y0 + (PAGER_H - 20) // 2),
+            ((g.width - _text_width(d, label, f.meta)) // 2, y0 + (PAGER_H - 20) // 2),
             label, font=f.meta, fill=BLACK,
         )
 
@@ -885,8 +919,8 @@ def render(
     # that space back (footer_h computed above). It only expands back to
     # full height for the one thing this app promises never to make easy to
     # miss: a dead network showing a stale list with no explanation.
-    fy = HEIGHT - footer_h
-    d.line([(MARGIN, fy), (TEXT_RIGHT, fy)], fill=BLACK)
+    fy = g.height - footer_h
+    d.line([(MARGIN, fy), (g.text_right, fy)], fill=BLACK)
     if stale_since is not None:
         warn = "OFFLINE since %s" % stale_since.strftime("%H:%M")
         d.text((MARGIN, fy + 14), warn, font=f.footer, fill=BLACK)
@@ -898,7 +932,8 @@ def render_detail(
     task: Task, completing: bool = False, expanded: bool = False, page: int = 0,
     now: Optional[datetime] = None, dark: bool = False, locked: bool = False,
     sort_newest: bool = False, focus_sticky: bool = True, group_by_area: bool = False,
-    group_by_project: bool = False, due_first: bool = False,
+    group_by_project: bool = False, due_first: bool = False, portrait: bool = False,
+    rotation: int = 0,
 ) -> Rendered:
     """One task, full title, and its checklist if it has one.
 
@@ -915,33 +950,34 @@ def render_detail(
     silently dropped — the last row on a page becomes a "page X/Y" control
     (wrapping around) whenever there's more than one page.
     """
+    g = PORTRAIT if portrait else LANDSCAPE
     now = now or datetime.now()
     f = fonts()
-    img = Image.new("1", (WIDTH, HEIGHT), WHITE)
+    img = Image.new("1", (g.width, g.height), WHITE)
     d = ImageDraw.Draw(img)
 
     # --- header: the same bar as the list, "< BACK" in place of the title ---
     hitboxes: List[Hitbox] = _draw_header(
-        d, now, "< BACK", "back",
+        d, g, now, "< BACK", "back",
         sort_newest=sort_newest, focus_sticky=focus_sticky,
         group_by_area=group_by_area, group_by_project=group_by_project,
-        due_first=due_first, dark=dark, locked=locked,
+        due_first=due_first, dark=dark, locked=locked, rotation=rotation,
     )
 
     # --- title + the task's own checkbox and star ---------------------------
-    y = HEADER_H + 10
+    y = g.header_h + 10
     box_y = y
     d.rectangle(
         [BOX_X, box_y, BOX_X + BOX, box_y + BOX],
         outline=BLACK, width=4 if task.focused else 2,
     )
-    star_cx = TEXT_RIGHT - DETAIL_STAR_ZONE_W // 2
+    star_cx = g.text_right - DETAIL_STAR_ZONE_W // 2
     _draw_star(d, star_cx, box_y + BOX // 2, STAR_SIZE, filled=task.focused)
     hitboxes.append(
-        Hitbox("star", TEXT_RIGHT - DETAIL_STAR_ZONE_W, TEXT_RIGHT, y, y + BOX, task_id=task.id)
+        Hitbox("star", g.text_right - DETAIL_STAR_ZONE_W, g.text_right, y, y + BOX, task_id=task.id)
     )
     title_lines = _wrap(
-        d, task.title, f.title, TEXT_RIGHT - TEXT_X - DETAIL_STAR_ZONE_W, max_lines=2
+        d, task.title, f.title, g.text_right - TEXT_X - DETAIL_STAR_ZONE_W, max_lines=2
     )
     line_y = y
     drawn_lines = []
@@ -958,19 +994,19 @@ def render_detail(
     # Same rule as everywhere else: only the checkbox column acts. The title
     # text has nothing further to open, so a tap there is a no-op rather
     # than a second, easy-to-hit-by-accident way to complete the task.
-    hitboxes.append(Hitbox("complete", 0, TEXT_X, HEADER_H, title_row_bottom, task_id=task.id))
+    hitboxes.append(Hitbox("complete", 0, TEXT_X, g.header_h, title_row_bottom, task_id=task.id))
 
     # --- meta + description --------------------------------------------------
     # The footer is just a rule here (the list's collapsed footer, same reason:
     # every pixel it doesn't spend is a checklist row). Checklist progress,
     # which used to live in it, rides the meta line's right edge instead.
-    fy = HEIGHT - COLLAPSED_FOOTER_H
+    fy = g.height - COLLAPSED_FOOTER_H
     y = title_row_bottom + 4
     meta = _append_age_due(_meta_line(task), task, now)
     done_count = sum(1 for item in task.checklist if item.completed)
     progress = "%d of %d done" % (done_count, len(task.checklist)) if task.checklist else ""
     if meta or progress:
-        meta_right = TEXT_RIGHT
+        meta_right = g.text_right
         if progress:
             meta_right -= _text_width(d, progress, f.footer)
             d.text((meta_right, y + 2), progress, font=f.footer, fill=BLACK)
@@ -978,7 +1014,7 @@ def render_detail(
         d.text((TEXT_X, y), _ellipsize(d, meta, f.meta, meta_right - TEXT_X), font=f.meta, fill=BLACK)
         y += 22
     if task.description:
-        max_width = TEXT_RIGHT - TEXT_X
+        max_width = g.text_right - TEXT_X
         all_lines = _wrap_paragraphs(d, task.description.strip(), f.footer, max_width)
         if task.checklist:
             # Competing with a checklist below — a fixed, generous
@@ -1010,11 +1046,11 @@ def render_detail(
                 d.text((TEXT_X, y), line, font=f.footer, fill=BLACK)
                 y += DETAIL_DESC_LINE_H
             if desc_total_pages > 1:
-                hitboxes.extend(_draw_detail_pager(d, y, y + PAGER_H, desc_page, desc_total_pages, task.id))
+                hitboxes.extend(_draw_detail_pager(d, g, y, y + PAGER_H, desc_page, desc_total_pages, task.id))
                 y += PAGER_H
 
     y += 6
-    d.line([(MARGIN, y), (TEXT_RIGHT, y)], fill=BLACK, width=1)
+    d.line([(MARGIN, y), (g.text_right, y)], fill=BLACK, width=1)
     y += 8
 
     # --- checklist: unchecked individually, done items stacked -------------
@@ -1047,14 +1083,14 @@ def render_detail(
         text_y = iy0 + (DETAIL_ROW_H - 20) // 2
 
         if kind == "stack":
-            hitboxes.append(Hitbox("expand", 0, WIDTH, iy0, iy1, task_id=task.id))
+            hitboxes.append(Hitbox("expand", 0, g.width, iy0, iy1, task_id=task.id))
             _draw_disclosure(d, BOX_X, box_y2, DETAIL_BOX, direction="right")
             d.text(
                 (item_text_x, text_y), "%d done — tap to show" % len(payload),
                 font=f.meta, fill=BLACK,
             )
         elif kind == "collapse":
-            hitboxes.append(Hitbox("collapse", 0, WIDTH, iy0, iy1, task_id=task.id))
+            hitboxes.append(Hitbox("collapse", 0, g.width, iy0, iy1, task_id=task.id))
             _draw_disclosure(d, BOX_X, box_y2, DETAIL_BOX, direction="down")
             d.text(
                 (item_text_x, text_y), "hide %d done" % payload,
@@ -1063,12 +1099,12 @@ def render_detail(
         else:
             item = payload
             hitboxes.append(
-                Hitbox("toggle", 0, WIDTH, iy0, iy1, task_id=task.id, item_id=item.id)
+                Hitbox("toggle", 0, g.width, iy0, iy1, task_id=task.id, item_id=item.id)
             )
             d.rectangle(
                 [BOX_X, box_y2, BOX_X + DETAIL_BOX, box_y2 + DETAIL_BOX], outline=BLACK, width=2
             )
-            text = _ellipsize(d, item.title, f.meta, TEXT_RIGHT - item_text_x)
+            text = _ellipsize(d, item.title, f.meta, g.text_right - item_text_x)
             d.text((item_text_x, text_y), text, font=f.meta, fill=BLACK)
             if item.completed:
                 # Tick, not a fill — a fill is reserved for "tap here to
@@ -1077,15 +1113,15 @@ def render_detail(
                 _draw_check(d, BOX_X, box_y2, DETAIL_BOX)
                 _strike_line(d, item_text_x, text_y, text, f.meta)
         if i < len(visible) - 1 or needs_paging:
-            d.line([(item_text_x, iy1), (TEXT_RIGHT, iy1)], fill=BLACK, width=1)
+            d.line([(item_text_x, iy1), (g.text_right, iy1)], fill=BLACK, width=1)
 
     if needs_paging:
         pi = len(visible)
         iy0 = y + pi * DETAIL_ROW_H
-        hitboxes.extend(_draw_detail_pager(d, iy0, iy0 + PAGER_H, page, total_pages, task.id))
+        hitboxes.extend(_draw_detail_pager(d, g, iy0, iy0 + PAGER_H, page, total_pages, task.id))
 
     # --- footer: a bare rule (progress is on the meta line) -----------------
-    d.line([(MARGIN, fy), (TEXT_RIGHT, fy)], fill=BLACK)
+    d.line([(MARGIN, fy), (g.text_right, fy)], fill=BLACK)
 
     return _finish(img, hitboxes, dark)
 

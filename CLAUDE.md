@@ -9,6 +9,7 @@ phone sync to) and the renderer that drives the panel.
 ```bash
 python3 tools/preview.py --scale 2    # render the layout to a PNG, no hardware
 python3 tools/preview.py --live       # ...against a real mindwtr-cloud
+python3 tools/preview.py --portrait   # the 480x800 layout (tools/webtest.py takes it too)
 python3 -m panel.app                  # the real loop
 ```
 
@@ -20,8 +21,9 @@ refresh measured 1.73s with the fast waveform, 3.84s normal (2026-10-01). The ve
 (confirmed against Waveshare's epd7in5_V2 source and its own demo — see
 `panel/display.py`), but repeated partial updates build up visible ghosting.
 So every update is partial — taps, their reconciles, background changes, poll
-ticks — and the full refresh (the black/white flash) is reserved for startup
-and one scheduled cleanup: `EPaperDisplay.cleanup_due()`, which fires only
+ticks — and the full refresh (the black/white flash) is reserved for startup,
+the rotate button (everything moves, so a partial would ghost badly) and one
+scheduled cleanup: `EPaperDisplay.cleanup_due()`, which fires only
 once enough partials have accumulated *and* the panel has been idle for a
 while, so it never lands under a finger or right after a lone background
 change. `FULL_REFRESH_EVERY` is only a safety net for a long unbroken burst. No continuous animation, no cursor, no
@@ -106,6 +108,34 @@ its own pager: only one pager fits on screen, and a task with both a long
 description and a long checklist needs a guaranteed minimum of *each*, not
 one paginated in full while the other gets crowded to zero.
 
+**Portrait is a second canvas, not a second layout.** Rotation (0/90/180/270)
+says how far the panel is turned clockwise as mounted. `PANEL_ROTATION` in
+`.env` is where it starts; the header's rotate button toggles landscape ↔
+portrait (UI turned 90° clockwise = rotation 270, `rotation.PORTRAIT_TURN`; 90 and
+180 stay `.env`-only) and saves the result to `local/state.json` (`PANEL_STATE_PATH`), which wins
+over `.env` from then on — a restart (crash, deploy) must not turn a mounted
+panel sideways. `Config.from_env` says so on stderr when the saved value
+overrides an explicit `PANEL_ROTATION`; delete the file to hand control back to
+`.env`. Rotating is a full refresh and resets list/checklist page to 0 (a page
+holds a different number of rows on the other canvas). The tester and the unit
+tests run with `state_path=None` and never write it. The UI is always drawn upright on a *logical* canvas —
+800x480, or 480x800 for 90/270 — via `theme.Geometry` (`LANDSCAPE`/`PORTRAIT`),
+which `render()`/`render_detail()` read their width, header height and text
+edge from instead of module constants. Only the two edges know about rotation,
+and both live in `panel/rotation.py` so they cannot disagree: `RotatedDisplay`
+turns the finished image onto the native frame (e-paper only — the png backend
+stays upright), and `EvdevTouch` turns raw touch points back before classifying,
+so a swipe is judged in the frame the user sees. Hitboxes, `Panel` and every
+tap rule stay in logical pixels. `tests/test_rotation.py` round-trips a marked
+pixel through both transforms for every rotation. Landscape output is
+pixel-identical to before the refactor (checked by diffing renders), so portrait
+changes nothing about it. Portrait's header is two rows — title/status/date, then
+the same eight controls spread in equal ~55px slots — because the landscape row
+is built for 800px; it shows ~10 list rows (6 landscape) and ~11 checklist
+items. Narrower text (~300px of title) means more ellipsis; wrapping long titles
+to two lines is the obvious next step if that bites on real tasks.
+TODO(oli): confirm on the panel that 270 (UI turned clockwise) matches how it's mounted.
+
 **The detail view spends nothing on a footer.** It is a bare rule, like the
 list's collapsed one, and checklist progress ("N of M done") sits right-aligned
 on the meta line instead. Its pager is the list's thin `PAGER_H` strip below the
@@ -123,7 +153,7 @@ drift apart. The view toggles still apply to the list you return to.
 In the list, tapping the view title
 is "home" (list page back to 0 — the toggles below are deliberately left
 alone, since a stray tap on the title shouldn't undo a view you set up on
-purpose). Seven toggles live in a fixed-position cluster at header-center,
+purpose). Eight controls live in a fixed-position cluster at header-center,
 anchored there rather than relative to the (variable-width) title or date
 text so neither can ever collide with it:
 - **focus-sticky** (star) — whether starred-today tasks pin to the top ahead
@@ -161,6 +191,10 @@ text so neither can ever collide with it:
   forget to check — "back" included, so a panel locked on a task's detail view
   stays there until unlocked. Background refreshes still draw while locked.
   In-memory like the other toggles: a restart unlocks and returns to light.
+- **rotate** (circular arrow, heavy border whenever the panel is turned from
+  native landscape) — toggles landscape ↔ portrait. Not like the other
+  toggles: it is saved across restarts, does a full refresh, and is gated by
+  the lock like everything else. See Portrait above.
 
 **Focus-sticky always wins when it's on** — starred-today tasks form their
 own flat leading section, sorted by `sort_newest` but never bucketed by
@@ -184,8 +218,9 @@ it until a header toggle or the home tap drops it; groups that appear in
 between go after the known ones. Tasks within a group need no freezing —
 removing one never reorders the rest.
 
-**Header status text is not a control.** "updated HH:MM" sits next to the
-date on the right — deliberately smaller (footer font vs. the controls' 20px
+**Header status text is not a control.** "upd HH:MM" sits next to the
+date on the right (just "Sat 17": both are short on purpose, header width being
+the scarce thing) — deliberately smaller (footer font vs. the controls' 20px
 icons) and grouped with the read-only date instead of the tappable cluster, so
 it reads as status, not another toggle. No sync glyph and no task count: both
 were spending header width on things the list itself already shows.

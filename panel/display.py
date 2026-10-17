@@ -14,6 +14,7 @@ from pathlib import Path
 from PIL import Image
 
 from .config import Config
+from .rotation import to_panel_image
 
 
 class Display:
@@ -25,6 +26,10 @@ class Display:
         change. Backends that have no such mode (or shouldn't bother — png
         has no ghosting to avoid) just fall back to a full show()."""
         self.show(image)
+
+    def set_rotation(self, rotation: int) -> None:
+        """Turn subsequent frames. Only the e-paper wrapper has anything to
+        turn — the png backends draw the upright logical image as is."""
 
     def cleanup_due(self) -> bool:
         """Whether enough partial-update residue has built up, and the panel
@@ -175,9 +180,36 @@ class EPaperDisplay(Display):
         self.epd.sleep()
 
 
+class RotatedDisplay(Display):
+    """Turns the logical (possibly portrait) image onto the panel's native
+    frame, then hands it to the real backend — so nothing above this knows the
+    panel is mounted sideways. Only wraps the e-paper: the png backend keeps
+    writing the upright logical image, which is what you want to look at."""
+
+    def __init__(self, inner: Display, rotation: int):
+        self.inner = inner
+        self.rotation = rotation
+
+    def set_rotation(self, rotation: int) -> None:
+        self.rotation = rotation
+
+    def show(self, image: Image.Image) -> None:
+        self.inner.show(to_panel_image(image, self.rotation))
+
+    def show_partial(self, image: Image.Image) -> None:
+        self.inner.show_partial(to_panel_image(image, self.rotation))
+
+    def cleanup_due(self) -> bool:
+        return self.inner.cleanup_due()
+
+    def close(self) -> None:
+        self.inner.close()
+
+
 def open_display(config: Config) -> Display:
     if config.display == "epaper":
-        return EPaperDisplay(fast=config.full_refresh != "normal")
+        # Always wrapped, even at rotation 0: the rotate button can turn it later.
+        return RotatedDisplay(EPaperDisplay(fast=config.full_refresh != "normal"), config.rotation)
     if config.display == "png":
         return PngDisplay(config.png_path)
     raise ValueError("unknown PANEL_DISPLAY: %s" % config.display)

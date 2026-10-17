@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from panel.client import ChecklistItem, MindwtrClient, Task, _parse_iso  # noqa: E402
 from panel.config import Config  # noqa: E402
 from panel.layout import render  # noqa: E402
+from panel.rotation import is_portrait  # noqa: E402
 
 FIXTURE = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "tasks.json"
 
@@ -54,6 +55,8 @@ def main() -> int:
     ap.add_argument("--out", type=Path, default=Path("local/preview.png"))
     ap.add_argument("--dark", action="store_true", help="dark mode (inverted)")
     ap.add_argument("--locked", action="store_true", help="draw the lock as engaged")
+    ap.add_argument("--portrait", action="store_true",
+                    help="480x800 portrait (also on when PANEL_ROTATION is 90 or 270)")
     ap.add_argument("--scale", type=int, default=1, help="upscale for screen viewing")
     args = ap.parse_args()
 
@@ -65,7 +68,10 @@ def main() -> int:
     else:
         tasks = from_fixture(args.fixture)
 
-    image = render(tasks, view, total=len(tasks), dark=args.dark, locked=args.locked).image
+    portrait = args.portrait or is_portrait(config.rotation)
+    image = render(
+        tasks, view, total=len(tasks), dark=args.dark, locked=args.locked, portrait=portrait
+    ).image
     if args.scale > 1:
         image = image.convert("L").resize(
             (image.width * args.scale, image.height * args.scale)

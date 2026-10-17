@@ -19,9 +19,10 @@ from datetime import datetime
 from typing import List, Optional
 
 from .client import MindwtrClient, MindwtrError, Task
-from .config import Config
+from .config import Config, save_rotation
 from .display import open_display
 from .layout import compute_group_order, hit, render, render_detail
+from .rotation import PORTRAIT_TURN, is_portrait
 from .touch import open_touch
 
 # Per status query, so effectively "everything": the list view paginates, so
@@ -41,6 +42,10 @@ class Panel:
         self.client = MindwtrClient(config.url, config.token)
         self.display = open_display(config)
         self.touch = open_touch(config)
+        # Starts at the configured (or last-saved) orientation; the header's
+        # rotate button toggles it between landscape and portrait. Unlike the view toggles it
+        # survives a restart — see _rotate.
+        self.rotation: int = config.rotation
         self.tasks: List[Task] = []
         self.stale_since: Optional[datetime] = None
         self.mode: str = "list"  # "list" | "detail"
@@ -109,12 +114,17 @@ class Panel:
             return None
         return next((t for t in self.tasks if t.id == task_id), None)
 
-    def _header_state(self) -> dict:
-        """The toggle state both views draw in their shared header bar."""
+    @property
+    def portrait(self) -> bool:
+        return is_portrait(self.rotation)
+
+    def _shared_state(self) -> dict:
+        """The state both views draw with: the header toggles and orientation."""
         return dict(
             sort_newest=self.sort_newest, focus_sticky=self.focus_sticky,
             group_by_area=self.group_by_area, group_by_project=self.group_by_project,
             due_first=self.due_first, dark=self.dark, locked=self.locked,
+            portrait=self.portrait, rotation=self.rotation,
         )
 
     def _signature(self) -> tuple:
@@ -131,7 +141,7 @@ class Panel:
                 return ("detail-missing", self.detail_task_id)
             return (
                 "detail", task, self.checklist_expanded, self.checklist_page,
-                tuple(sorted(self._header_state().items())),
+                tuple(sorted(self._shared_state().items())),
             )
         return (
             "list", tuple(self.tasks), self.list_page,
@@ -154,7 +164,7 @@ class Panel:
             rendered = render_detail(
                 self._find(self.detail_task_id),
                 expanded=self.checklist_expanded, page=self.checklist_page,
-                **self._header_state(),
+                **self._shared_state(),
             )
         else:
             rendered = render(
@@ -164,7 +174,7 @@ class Panel:
                 stale_since=self.stale_since,
                 page=self.list_page,
                 group_order=self._frozen_group_order(),
-                **self._header_state(),
+                **self._shared_state(),
             )
         if partial:
             self.display.show_partial(rendered.image)
@@ -264,6 +274,31 @@ class Panel:
         elif box.kind == "toggle_lock":
             self.locked = not self.locked
             self.draw(force=True, partial=True)
+        elif box.kind == "toggle_rotate":
+            self._rotate()
+
+    def _rotate(self) -> None:
+        """Toggle between landscape and portrait (PORTRAIT_TURN). From any
+        other configured orientation — 90 or 180 set in .env — the first tap
+        goes back to landscape. Everything changes place, so this is a full
+        refresh (the flash), not a partial: the one tap-driven update besides
+        the rule's own exceptions, because a whole-screen repaint in new
+        positions is exactly what partials ghost on."""
+        self.rotation = 0 if self.rotation else PORTRAIT_TURN
+        # png backends and test stubs have no set_rotation: they draw upright.
+        for device in (self.display, self.touch):
+            set_rotation = getattr(device, "set_rotation", None)
+            if set_rotation is not None:
+                set_rotation(self.rotation)
+        # A page number from the old canvas means something else on this one
+        # (6 rows a page vs 10), so start from the top rather than guess.
+        self.list_page, self.checklist_page = 0, 0
+        if self.config.state_path is not None:
+            try:
+                save_rotation(self.config.state_path, self.rotation)
+            except OSError as exc:
+                print("could not save rotation: %s" % exc, file=sys.stderr)
+        self.draw(force=True)
 
     def _complete_task(self, task_id: str) -> None:
         task = self._find(task_id)
@@ -301,14 +336,14 @@ class Panel:
             rendered = render_detail(
                 task, completing=True,
                 expanded=self.checklist_expanded, page=self.checklist_page,
-                **self._header_state(),
+                **self._shared_state(),
             )
         else:
             rendered = render(
                 self.tasks, self.config.view, total=len(self.tasks),
                 stale_since=self.stale_since, completing=task.id, page=self.list_page,
                 group_order=self._frozen_group_order(),
-                **self._header_state(),
+                **self._shared_state(),
             )
         self.display.show_partial(rendered.image)
         self.hitboxes = rendered.hitboxes

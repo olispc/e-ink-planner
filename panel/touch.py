@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from .config import Config
+from .rotation import to_logical_point
 from .theme import HEIGHT, WIDTH
 
 # A stroke that travels less than TAP_SLOP is a tap; one that travels at least
@@ -50,6 +51,9 @@ class TouchSource:
         stroke was neither)."""
         raise NotImplementedError
 
+    def set_rotation(self, rotation: int) -> None:
+        """Map subsequent strokes for a panel turned to `rotation`."""
+
     def close(self) -> None:
         pass
 
@@ -64,10 +68,11 @@ class NoTouch(TouchSource):
 
 
 class EvdevTouch(TouchSource):
-    def __init__(self, device_path: str):
+    def __init__(self, device_path: str, rotation: int = 0):
         import evdev  # noqa: WPS433 — Pi-only import
 
         self.evdev = evdev
+        self.rotation = rotation
         self.device = evdev.InputDevice(device_path)
         caps = self.device.capabilities(absinfo=True).get(evdev.ecodes.EV_ABS, [])
         ranges = {code: info for code, info in caps}
@@ -88,6 +93,9 @@ class EvdevTouch(TouchSource):
         self._pending: deque = deque()
         self._debug = bool(os.environ.get("PANEL_TOUCH_DEBUG"))
 
+    def set_rotation(self, rotation: int) -> None:
+        self.rotation = rotation
+
     def _to_panel(self, x: int, y: int) -> Tuple[int, int]:
         # Checked on the real panel: corner taps read (12, 3) and (793, 479),
         # so the digitiser's axes match the display — no inversion or swap.
@@ -102,7 +110,11 @@ class EvdevTouch(TouchSource):
         self._samples = 0
         if start is None or None in start or last is None or None in last:
             return None
-        s, e = self._to_panel(*start), self._to_panel(*last)
+        # Native panel pixels -> the logical canvas the UI was drawn on, so
+        # a stroke is classified (tap, left/right swipe) in the frame the
+        # user sees. A no-op at rotation 0.
+        s = to_logical_point(*self._to_panel(*start), self.rotation)
+        e = to_logical_point(*self._to_panel(*last), self.rotation)
         gesture = classify(s, e)
         if self._debug:
             print("touch stroke %s -> %s (%d samples): %s" % (s, e, samples, gesture), file=sys.stderr)
@@ -151,7 +163,7 @@ class EvdevTouch(TouchSource):
 def open_touch(config: Config) -> TouchSource:
     if config.touch == "evdev":
         try:
-            return EvdevTouch(config.touch_device)
+            return EvdevTouch(config.touch_device, config.rotation)
         except Exception as exc:  # noqa: BLE001 — any failure degrades gracefully
             print("touch unavailable (%s); running display-only" % exc)
             return NoTouch()

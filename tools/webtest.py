@@ -48,6 +48,12 @@ from panel.client import MindwtrError, Task  # noqa: E402
 from panel.config import Config  # noqa: E402
 from panel.theme import HEIGHT, WHITE, WIDTH  # noqa: E402
 
+
+def _canvas(portrait: bool):
+    """The logical canvas this tester draws and hit-tests on: upright, never
+    rotated (rotation only matters to the real display and touch chip)."""
+    return (HEIGHT, WIDTH) if portrait else (WIDTH, HEIGHT)
+
 SCALE = 2  # displayed size only; taps are mapped back to panel coordinates
 
 # A full refresh really does take ~1.7s (fast waveform) and visibly flashes on real e-paper,
@@ -80,7 +86,7 @@ PAGE = """<!doctype html>
   #mode {{ color: #f80; font-weight: bold; }}
 </style>
 <div id="frame">
-  <img id="panel" src="/panel.png" width="{width}" height="{height}">
+  <img id="panel" src="/panel.png">
   <div id="veil">redrawing…</div>
 </div>
 <div>
@@ -123,8 +129,9 @@ img.addEventListener('click', async (e) => {{
   // Hit-testing on the server works in real panel space (800x480), not the
   // displayed bitmap's 2x-scaled pixels — divide out both the CSS display
   // scaling (rect vs. the bitmap) and SCALE (the bitmap vs. the panel).
-  const x = Math.round((e.clientX - rect.left) / rect.width * {real_width});
-  const y = Math.round((e.clientY - rect.top) / rect.height * {real_height});
+  // The bitmap's own size, not a baked-in one: the rotate button changes it.
+  const x = Math.round((e.clientX - rect.left) / rect.width * img.naturalWidth / {scale});
+  const y = Math.round((e.clientY - rect.top) / rect.height * img.naturalHeight / {scale});
   await fetch(`/tap?x=${{x}}&y=${{y}}`, {{method: 'POST'}});
   pollFast();
 }});
@@ -162,8 +169,7 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/":
             html = PAGE.format(
-                width=WIDTH * SCALE, height=HEIGHT * SCALE,
-                real_width=WIDTH, real_height=HEIGHT,
+                scale=SCALE,
                 full_ms=FULL_REFRESH_MS, fast_ms=FAST_POLL_MS, fast_ticks=FAST_POLL_TICKS,
                 idle_ms=IDLE_POLL_MS,
                 mode_label=self.mode_label,
@@ -178,7 +184,8 @@ class Handler(BaseHTTPRequestHandler):
             # real e-paper mid-update.
             image = self.panel.display.last_image
             buf = io.BytesIO()
-            image.resize((WIDTH * SCALE, HEIGHT * SCALE), resample=0).save(buf, "PNG")
+            w, h = _canvas(self.panel.portrait)
+            image.resize((w * SCALE, h * SCALE), resample=0).save(buf, "PNG")
             self._send(200, buf.getvalue(), "image/png")
         else:
             self._send(404, b"not found", "text/plain")
@@ -218,10 +225,10 @@ class CapturingPngDisplay:
     """Keeps the last rendered image in memory instead of touching disk —
     the browser tab is the only consumer here."""
 
-    def __init__(self) -> None:
+    def __init__(self, portrait: bool = False) -> None:
         from PIL import Image
 
-        self.last_image = Image.new("1", (WIDTH, HEIGHT), WHITE)
+        self.last_image = Image.new("1", _canvas(portrait), WHITE)
 
     def show(self, image) -> None:
         self.last_image = image
@@ -315,17 +322,23 @@ def main() -> int:
     )
     ap.add_argument("--view", default=None, help="next | inbox | waiting | someday | focus")
     ap.add_argument("--fixture", action="store_true", help="synthetic data, no network calls")
+    ap.add_argument("--portrait", action="store_true",
+                    help="480x800 portrait (also on when PANEL_ROTATION is 90 or 270)")
     args = ap.parse_args()
 
     config = Config.from_env()
     if args.view:
         config = Config(**{**config.__dict__, "view": args.view})
+    if args.portrait and config.rotation not in (90, 270):
+        config = Config(**{**config.__dict__, "rotation": 90})
+    # A laptop tester must never write the saved orientation the Pi would read.
+    config = Config(**{**config.__dict__, "state_path": None})
     if not args.fixture and not config.token:
         print("MINDWTR_TOKEN is not set — copy .env.example to .env, or use --fixture", file=sys.stderr)
         return 1
 
     panel = Panel(config)
-    panel.display = CapturingPngDisplay()  # override: no file, no hardware
+    panel.display = CapturingPngDisplay(panel.portrait)  # override: no file, no hardware
     if args.fixture:
         from tools.preview import FIXTURE, from_fixture
 
