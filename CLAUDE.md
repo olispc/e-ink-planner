@@ -106,6 +106,14 @@ its own pager: only one pager fits on screen, and a task with both a long
 description and a long checklist needs a guaranteed minimum of *each*, not
 one paginated in full while the other gets crowded to zero.
 
+**The detail view spends nothing on a footer.** It is a bare rule, like the
+list's collapsed one, and checklist progress ("N of M done") sits right-aligned
+on the meta line instead. Its pager is the list's thin `PAGER_H` strip below the
+rows rather than a whole row's height, so paging costs less than one item. Rows
+stay `DETAIL_ROW_H` (46px, the ~9mm tap floor) — the space came from around the
+rows, not from shrinking them: six checklist items fit per page (four before),
+and a six-item list needs no pager at all.
+
 **The header holds real controls, not just a title — and it is the same bar
 on the list and the detail view.** `_draw_header()` draws both (title tap is
 "home" in the list, "back" in detail; everything right of it is identical), so

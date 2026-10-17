@@ -929,7 +929,7 @@ def render_detail(
     )
 
     # --- title + the task's own checkbox and star ---------------------------
-    y = HEADER_H + 14
+    y = HEADER_H + 10
     box_y = y
     d.rectangle(
         [BOX_X, box_y, BOX_X + BOX, box_y + BOX],
@@ -954,19 +954,29 @@ def render_detail(
         _draw_check(d, BOX_X, box_y, BOX)
         for line, ly in drawn_lines:
             _strike_line(d, TEXT_X, ly, line, f.title, width=3)
-    title_row_bottom = max(line_y, box_y + BOX + 8)
+    title_row_bottom = max(line_y, box_y + BOX + 6)
     # Same rule as everywhere else: only the checkbox column acts. The title
     # text has nothing further to open, so a tap there is a no-op rather
     # than a second, easy-to-hit-by-accident way to complete the task.
     hitboxes.append(Hitbox("complete", 0, TEXT_X, HEADER_H, title_row_bottom, task_id=task.id))
 
     # --- meta + description --------------------------------------------------
-    fy = HEIGHT - FOOTER_H
+    # The footer is just a rule here (the list's collapsed footer, same reason:
+    # every pixel it doesn't spend is a checklist row). Checklist progress,
+    # which used to live in it, rides the meta line's right edge instead.
+    fy = HEIGHT - COLLAPSED_FOOTER_H
     y = title_row_bottom + 4
     meta = _append_age_due(_meta_line(task), task, now)
-    if meta:
-        d.text((TEXT_X, y), _ellipsize(d, meta, f.meta, TEXT_RIGHT - TEXT_X), font=f.meta, fill=BLACK)
-        y += 24
+    done_count = sum(1 for item in task.checklist if item.completed)
+    progress = "%d of %d done" % (done_count, len(task.checklist)) if task.checklist else ""
+    if meta or progress:
+        meta_right = TEXT_RIGHT
+        if progress:
+            meta_right -= _text_width(d, progress, f.footer)
+            d.text((meta_right, y + 2), progress, font=f.footer, fill=BLACK)
+            meta_right -= 16
+        d.text((TEXT_X, y), _ellipsize(d, meta, f.meta, meta_right - TEXT_X), font=f.meta, fill=BLACK)
+        y += 22
     if task.description:
         max_width = TEXT_RIGHT - TEXT_X
         all_lines = _wrap_paragraphs(d, task.description.strip(), f.footer, max_width)
@@ -990,7 +1000,7 @@ def render_detail(
             if total_h <= available:
                 desc_page, desc_total_pages, visible_desc = 0, 1, all_lines
             else:
-                capacity = max(DETAIL_DESC_LINE_H, available - DETAIL_ROW_H)
+                capacity = max(DETAIL_DESC_LINE_H, available - PAGER_H)
                 lines_per_page = max(1, capacity // DETAIL_DESC_LINE_H)
                 desc_total_pages = max(1, -(-len(all_lines) // lines_per_page))
                 desc_page = max(0, min(page, desc_total_pages - 1))
@@ -1000,12 +1010,12 @@ def render_detail(
                 d.text((TEXT_X, y), line, font=f.footer, fill=BLACK)
                 y += DETAIL_DESC_LINE_H
             if desc_total_pages > 1:
-                hitboxes.extend(_draw_detail_pager(d, y, y + DETAIL_ROW_H, desc_page, desc_total_pages, task.id))
-                y += DETAIL_ROW_H
+                hitboxes.extend(_draw_detail_pager(d, y, y + PAGER_H, desc_page, desc_total_pages, task.id))
+                y += PAGER_H
 
     y += 6
     d.line([(MARGIN, y), (TEXT_RIGHT, y)], fill=BLACK, width=1)
-    y += 10
+    y += 8
 
     # --- checklist: unchecked individually, done items stacked -------------
     unchecked = [item for item in task.checklist if not item.completed]
@@ -1019,10 +1029,11 @@ def render_detail(
             entries.append(("stack", done))
 
     max_rows = max(0, (fy - y) // DETAIL_ROW_H)
-    # A page whose entries don't fit reserves its last row for the pager —
-    # so if paging is needed at all, each page holds one fewer real row.
+    # A page whose entries don't fit reserves a thin pager strip (PAGER_H, the
+    # list view's) below its rows rather than a whole row's height, so paging
+    # costs less than one item.
     needs_paging = len(entries) > max_rows
-    page_capacity = max(1, max_rows - 1) if needs_paging else max_rows
+    page_capacity = max(1, (fy - y - PAGER_H) // DETAIL_ROW_H) if needs_paging else max_rows
     total_pages = max(1, -(-len(entries) // page_capacity)) if page_capacity else 1
     page = max(0, min(page, total_pages - 1))
     start = page * page_capacity
@@ -1071,16 +1082,10 @@ def render_detail(
     if needs_paging:
         pi = len(visible)
         iy0 = y + pi * DETAIL_ROW_H
-        hitboxes.extend(_draw_detail_pager(d, iy0, iy0 + DETAIL_ROW_H, page, total_pages, task.id))
+        hitboxes.extend(_draw_detail_pager(d, iy0, iy0 + PAGER_H, page, total_pages, task.id))
 
-    # --- footer: checklist progress, not a poll timestamp -------------------
-    fy_line = HEIGHT - FOOTER_H
-    d.line([(MARGIN, fy_line), (TEXT_RIGHT, fy_line)], fill=BLACK)
-    if task.checklist:
-        d.text(
-            (MARGIN, fy_line + 14), "%d of %d done" % (len(done), len(task.checklist)),
-            font=f.footer, fill=BLACK,
-        )
+    # --- footer: a bare rule (progress is on the meta line) -----------------
+    d.line([(MARGIN, fy), (TEXT_RIGHT, fy)], fill=BLACK)
 
     return _finish(img, hitboxes, dark)
 

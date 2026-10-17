@@ -13,7 +13,8 @@ from panel.layout import (  # noqa: E402
     _format_due, _organize_tasks, _relative_age, compute_group_order, hit, render, render_detail,
 )
 from panel.theme import (  # noqa: E402
-    BLACK, DETAIL_DESC_MIN_LINES_WITH_CHECKLIST, HEADER_H, HEIGHT, MARGIN, ROW_H, ROWS,
+    BLACK, COLLAPSED_FOOTER_H, DETAIL_DESC_MIN_LINES_WITH_CHECKLIST, HEADER_H, HEIGHT,
+    MARGIN, ROW_H, ROWS,
     STAR_ZONE_W, TEXT_RIGHT, TEXT_X, WHITE, WIDTH,
 )
 
@@ -533,6 +534,20 @@ class TestDetailRendering(unittest.TestCase):
     def test_no_checklist_renders_without_toggle_hitboxes(self):
         rendered = render_detail(task(1))
         self.assertEqual([b for b in rendered.hitboxes if b.kind == "toggle"], [])
+
+    def test_six_checklist_items_fit_without_a_pager(self):
+        # The footer is a bare rule and progress rides the meta line, so a
+        # six-item checklist (a normal shopping list) needs no paging at all.
+        rendered = render_detail(task(1, checklist=[item(n) for n in range(6)]))
+        self.assertEqual(len([b for b in rendered.hitboxes if b.kind == "toggle"]), 6)
+        self.assertEqual([b for b in rendered.hitboxes if b.kind == "page"], [])
+
+    def test_paged_checklist_still_shows_six_rows_above_a_thin_pager(self):
+        rendered = render_detail(task(1, checklist=[item(n) for n in range(12)]))
+        self.assertEqual(len([b for b in rendered.hitboxes if b.kind == "toggle"]), 6)
+        pagers = [b for b in rendered.hitboxes if b.kind == "page"]
+        self.assertEqual(len(pagers), 2)
+        self.assertLessEqual(pagers[0].y1, HEIGHT - COLLAPSED_FOOTER_H)
 
     def test_header_title_goes_back(self):
         rendered = render_detail(task(1))
