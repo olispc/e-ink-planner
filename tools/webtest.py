@@ -281,6 +281,7 @@ def poll_loop(panel: Panel, lock: threading.Lock, stop: threading.Event) -> None
     deadline = time.monotonic() + panel.config.poll_seconds
     while not stop.wait(panel.config.check_seconds):
         with lock:
+            panel.tick()   # the lock screen's clock and keypad timeout
             if time.monotonic() >= deadline:
                 panel.refresh()
                 panel.draw(partial=True)
@@ -332,7 +333,9 @@ def main() -> int:
     if args.portrait and config.rotation not in (90, 270):
         config = Config(**{**config.__dict__, "rotation": 90})
     # A laptop tester must never write the saved orientation the Pi would read.
-    config = Config(**{**config.__dict__, "state_path": None})
+    # Never writes local/state.json, and starts on the list rather than the
+    # lock screen the real panel always starts behind.
+    config = Config(**{**config.__dict__, "state_path": None, "start_locked": False})
     if not args.fixture and not config.token:
         print("MINDWTR_TOKEN is not set — copy .env.example to .env, or use --fixture", file=sys.stderr)
         return 1

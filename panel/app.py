@@ -11,6 +11,7 @@ enough residue has built up *and* the panel has been idle a while.
 """
 from __future__ import annotations
 
+import hmac
 import signal
 import sys
 import time
@@ -22,7 +23,11 @@ from .client import MindwtrClient, MindwtrError, Task
 from .config import Config, save_rotation
 from .display import open_display
 from .layout import compute_group_order, hit, render, render_detail
+from .lockscreen import load_background, pick_background, render_lock
 from .rotation import PORTRAIT_TURN, is_portrait
+from .theme import (
+    LOCK_COOLDOWN_MAX, LOCK_COOLDOWN_SECONDS, LOCK_FREE_TRIES, LOCK_KEYPAD_TIMEOUT,
+)
 from .touch import open_touch
 
 # Per status query, so effectively "everything": the list view paginates, so
@@ -72,13 +77,26 @@ class Panel:
         # section, which stays exempt as "the starred list" regardless.
         self.due_first: bool = False
         # Display and input state, both in-memory like the toggles above.
-        # `dark` inverts the whole render. `locked` makes every tap except
-        # the lock button's own a no-op — for wiping the glass or a child's
-        # curious hand. The header (lock included) is on both views, so a
-        # panel can be locked while showing a task's detail; unlocking is
-        # always one tap away, and "back" is blocked like everything else.
+        # `dark` inverts the whole render. `touch_locked` makes every tap
+        # except the touch-lock button's own a no-op — for wiping the glass or
+        # a child's curious hand. The header (that button included) is on both
+        # views, so touch can be locked while showing a task's detail;
+        # unlocking is always one tap away, and "back" is blocked like
+        # everything else.
         self.dark: bool = False
-        self.locked: bool = False
+        self.touch_locked: bool = False
+        # The screen lock is the opposite case: not "don't let taps change
+        # anything" but "don't show the tasks at all" — a clock instead, and
+        # a passcode to get back. The panel always starts locked (see
+        # Config.start_locked), so restarting it is never a way around this.
+        self.screen_locked: bool = False
+        self._set_screen_locked(config.start_locked)
+        self.lock_keypad: bool = False       # clock face, or the keypad face
+        self.lock_entry: str = ""            # digits typed so far
+        self.lock_message: Optional[str] = None
+        self.lock_failures: int = 0          # wrong codes since the last unlock
+        self.lock_blocked_until: float = 0.0  # monotonic; digits ignored until then
+        self.lock_last_input: float = 0.0     # monotonic; folds the keypad away
         # Frozen group order (see layout.compute_group_order): taken lazily
         # on the first grouped draw, dropped whenever the user changes a
         # toggle or taps home, so completing/starring tasks never reshuffles
@@ -123,7 +141,7 @@ class Panel:
         return dict(
             sort_newest=self.sort_newest, focus_sticky=self.focus_sticky,
             group_by_area=self.group_by_area, group_by_project=self.group_by_project,
-            due_first=self.due_first, dark=self.dark, locked=self.locked,
+            due_first=self.due_first, dark=self.dark, touch_locked=self.touch_locked,
             portrait=self.portrait, rotation=self.rotation,
         )
 
@@ -135,6 +153,14 @@ class Panel:
         # see an "unchanged" signature and skip the redraw. Task is a frozen
         # dataclass, so tuple equality here compares every field (including
         # nested ones like checklist) without needing to enumerate them.
+        if self.screen_locked:
+            # Nothing about the tasks: a background change while locked has
+            # nothing to show. The minute is in it so the clock ticks.
+            now = datetime.now()
+            return (
+                "lock", now.strftime("%Y-%m-%d %H:%M"), self.lock_keypad,
+                len(self.lock_entry), self.lock_message, self.dark, self.portrait,
+            )
         if self.mode == "detail":
             task = self._find(self.detail_task_id)
             if task is None:
@@ -146,7 +172,7 @@ class Panel:
         return (
             "list", tuple(self.tasks), self.list_page,
             self.sort_newest, self.focus_sticky, self.group_by_area, self.group_by_project,
-            self.due_first, self.stale_since is not None, self.dark, self.locked,
+            self.due_first, self.stale_since is not None, self.dark, self.touch_locked,
         )
 
     # -- output -----------------------------------------------------------
@@ -160,7 +186,9 @@ class Panel:
         signature = self._signature()
         if not force and signature == self._last_signature:
             return
-        if self.mode == "detail":
+        if self.screen_locked:
+            rendered = self._render_lock()
+        elif self.mode == "detail":
             rendered = render_detail(
                 self._find(self.detail_task_id),
                 expanded=self.checklist_expanded, page=self.checklist_page,
@@ -183,10 +211,20 @@ class Panel:
         self.hitboxes = rendered.hitboxes
         self._last_signature = signature
 
+    def _render_lock(self):
+        size = (480, 800) if self.portrait else (800, 480)
+        now = datetime.now()
+        background = load_background(pick_background(self.config.lock_images, now), size)
+        return render_lock(
+            now=now, portrait=self.portrait, keypad=self.lock_keypad,
+            entered=len(self.lock_entry), code_length=len(self.config.passcode),
+            message=self.lock_message, background=background, dark=self.dark,
+        )
+
     # -- interaction ------------------------------------------------------
     def handle_gesture(self, gesture) -> None:
         if gesture.kind == "swipe":
-            if self.locked:
+            if self.touch_locked or self.screen_locked:
                 return
             self.handle_swipe(gesture.dx)
         else:
@@ -207,10 +245,17 @@ class Panel:
         box = hit(getattr(self, "hitboxes", []), point)
         if box is None:
             return
-        # The one gate for touch input: locked, the lock button is the only
+        # The lock screen draws only its own boxes, but a tap can race a
+        # redraw, so it is gated by kind here too: while screen-locked nothing
+        # but the lock screen's own boxes does anything.
+        if self.screen_locked:
+            if box.kind in ("lock_wake", "lock_key"):
+                self._handle_lock_tap(box)
+            return
+        # The one gate for touch input: touch-locked, its button is the only
         # live target — everything else (rows, pagers, other toggles) falls
         # through to nothing, so no future box kind can forget to check.
-        if self.locked and box.kind != "toggle_lock":
+        if self.touch_locked and box.kind != "toggle_touch_lock":
             return
         if box.kind == "back":
             self.mode, self.detail_task_id = "list", None
@@ -271,9 +316,11 @@ class Panel:
             # page or group-order reset like the view toggles above.
             self.dark = not self.dark
             self.draw(force=True, partial=True)
-        elif box.kind == "toggle_lock":
-            self.locked = not self.locked
+        elif box.kind == "toggle_touch_lock":
+            self.touch_locked = not self.touch_locked
             self.draw(force=True, partial=True)
+        elif box.kind == "lock_screen":
+            self._lock_screen()
         elif box.kind == "toggle_rotate":
             self._rotate()
 
@@ -299,6 +346,99 @@ class Panel:
             except OSError as exc:
                 print("could not save rotation: %s" % exc, file=sys.stderr)
         self.draw(force=True)
+
+    # -- screen lock --------------------------------------------------------
+    # Refresh rule for the screen lock, from what the panel showed (2026-10-20):
+    # the fast full waveform leaves a dithered photo pale with earlier frames
+    # showing through, and partials drawn over that pale base come out as
+    # stencilled, half-dark digits. So while locked the display makes every
+    # full refresh thorough (set_thorough: the normal waveform, ~3.9s), and
+    # the photo is always painted by one: on locking (which also leaves no
+    # ghost of the list), on starting up locked, and on folding back to the
+    # clock. Waking to the keypad and unlocking stay partial — white keys
+    # cover the photo, and partial back to the list was fine on the panel —
+    # as do a typed digit and the minute ticking.
+    def _set_screen_locked(self, locked: bool) -> None:
+        self.screen_locked = locked
+        # png backends and test stubs have one kind of full refresh.
+        set_thorough = getattr(self.display, "set_thorough", None)
+        if set_thorough is not None:
+            set_thorough(locked)
+
+    def _lock_screen(self) -> None:
+        self._set_screen_locked(True)
+        self.lock_keypad, self.lock_entry, self.lock_message = False, "", None
+        self.draw(force=True)
+
+    def _unlock_screen(self) -> None:
+        self._set_screen_locked(False)
+        self.lock_keypad, self.lock_entry, self.lock_message = False, "", None
+        self.lock_failures, self.lock_blocked_until = 0, 0.0
+        self.draw(force=True, partial=True)
+
+    def _handle_lock_tap(self, box) -> None:
+        now = time.monotonic()
+        self.lock_last_input = now
+        if box.kind == "lock_wake":
+            # No passcode set: the lock only hides the list, so a tap is enough.
+            if not self.config.passcode:
+                self._unlock_screen()
+                return
+            self.lock_keypad, self.lock_entry = True, ""
+            if now >= self.lock_blocked_until:
+                self.lock_message = None
+            self.draw(force=True, partial=True)
+            return
+        if box.key == "cancel":
+            self.lock_keypad, self.lock_entry = False, ""
+            self.draw(force=True)
+            return
+        if box.key == "delete":
+            self.lock_entry = self.lock_entry[:-1]
+        elif now < self.lock_blocked_until:
+            return   # cooling down after too many misses: digits do nothing
+        else:
+            self.lock_entry += box.key
+            self.lock_message = None
+            if len(self.lock_entry) >= len(self.config.passcode):
+                # Constant-time compare: cheap, and there's no reason not to.
+                if hmac.compare_digest(self.lock_entry, self.config.passcode):
+                    self._unlock_screen()
+                    return
+                self._wrong_code(now)
+        self.draw(partial=True)
+
+    def _wrong_code(self, now: float) -> None:
+        """The code's length is shown (one dot per digit), so a guess is
+        checked as soon as it's complete — no enter key. After
+        LOCK_FREE_TRIES misses each further one starts a cooldown, doubling
+        each time up to LOCK_COOLDOWN_MAX."""
+        self.lock_failures += 1
+        self.lock_entry = ""
+        over = self.lock_failures - LOCK_FREE_TRIES
+        if over < 0:
+            self.lock_message = "Wrong code"
+            return
+        wait = min(LOCK_COOLDOWN_SECONDS * 2 ** over, LOCK_COOLDOWN_MAX)
+        self.lock_blocked_until = now + wait
+        self.lock_message = "Wrong code. Try again in %s" % (
+            "%d s" % wait if wait < 60 else "%d min" % round(wait / 60)
+        )
+
+    def tick(self) -> None:
+        """Called between gestures by run(): the lock screen's clock and its
+        timeouts. Drawing goes through the signature as always, so this only
+        reaches the panel when the minute (or what's shown) actually changed."""
+        if not self.screen_locked:
+            return
+        now = time.monotonic()
+        if self.lock_keypad and now - self.lock_last_input >= LOCK_KEYPAD_TIMEOUT:
+            self.lock_keypad, self.lock_entry = False, ""
+            self.draw(force=True)   # a face change: see the refresh rule above
+        if self.lock_blocked_until and now >= self.lock_blocked_until:
+            # The cooldown is over, so its "try again in" stops being true.
+            self.lock_blocked_until, self.lock_message = 0.0, None
+        self.draw(partial=True)
 
     def _complete_task(self, task_id: str) -> None:
         task = self._find(task_id)
@@ -425,6 +565,7 @@ class Panel:
                     self.handle_gesture(gesture)
                     deadline = time.monotonic() + self.config.poll_seconds
                     continue
+                self.tick()
                 # Every update is partial; the full refresh that clears their
                 # ghosting is the display's call (see cleanup_due) and only
                 # ever happens while the panel is idle.
@@ -453,6 +594,9 @@ def main() -> int:
     if not config.token:
         print("MINDWTR_TOKEN is not set — copy .env.example to .env", file=sys.stderr)
         return 1
+    if not config.passcode:
+        print("PANEL_PASSCODE is not set: the screen lock hides the list, "
+              "but a tap unlocks it", file=sys.stderr)
     panel = Panel(config)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     try:

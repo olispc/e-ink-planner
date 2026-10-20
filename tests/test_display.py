@@ -27,12 +27,26 @@ def make_display(clock) -> EPaperDisplay:
     d = EPaperDisplay.__new__(EPaperDisplay)
     d.epd = FakeEPD()
     d._fast = True
+    d._thorough = False
     d._fasts_since_normal = 0
     d._mode = "normal"
     d._partials_since_full = 0
     d._last_full_at = clock[0]
     d._last_partial_at = 0.0
     return d
+
+
+class TestThoroughRefresh(unittest.TestCase):
+    def test_every_full_refresh_is_normal_while_on_even_with_fast_configured(self):
+        d = make_display([1000.0])
+        d.set_thorough(True)
+        d.show_partial(None)                 # controller now in partial mode
+        d.show(None)
+        d.show(None)
+        self.assertEqual(d.epd.inits, ["normal"])
+        d.set_thorough(False)
+        d.show(None)                         # back to the fast waveform
+        self.assertEqual(d.epd.inits, ["normal", "fast"])
 
 
 class TestCleanupDue(unittest.TestCase):

@@ -27,6 +27,14 @@ class Display:
         has no ghosting to avoid) just fall back to a full show()."""
         self.show(image)
 
+    def set_thorough(self, on: bool) -> None:
+        """While on, every full refresh — whoever asks for it: a tap, the idle
+        cleanup, the partial-burst safety net — takes the slow, thorough
+        waveform, never the fast one. For screens the fast one measurably
+        fails on: the lock screen's dithered photo, where it left pale blacks
+        and earlier frames showing through. Backends with one kind of full
+        refresh have nothing to switch."""
+
     def set_rotation(self, rotation: int) -> None:
         """Turn subsequent frames. Only the e-paper wrapper has anything to
         turn — the png backends draw the upright logical image as is."""
@@ -127,16 +135,21 @@ class EPaperDisplay(Display):
         # ones the next full refresh takes the normal waveform to mop up what
         # they left. PANEL_FULL_REFRESH=normal makes every one normal.
         self._fast = fast
+        self._thorough = False  # see set_thorough
         self._fasts_since_normal = 0  # startup's init()+Clear() just counted as normal
         self._mode = "normal"  # which init the controller is currently in
         self._partials_since_full = 0
         self._last_full_at = time.monotonic()
         self._last_partial_at = 0.0
 
+    def set_thorough(self, on: bool) -> None:
+        self._thorough = on
+
     def show(self, image: Image.Image) -> None:
         # getbuffer wants a PIL image the size of the panel; mode "1" is what
         # it packs from, so no conversion needed.
-        want = "fast" if self._fast and self._fasts_since_normal < self.FAST_PER_NORMAL else "normal"
+        fast = self._fast and not self._thorough and self._fasts_since_normal < self.FAST_PER_NORMAL
+        want = "fast" if fast else "normal"
         if self._mode != want:
             (self.epd.init_fast if want == "fast" else self.epd.init)()
             self._mode = want
@@ -198,6 +211,9 @@ class RotatedDisplay(Display):
 
     def show_partial(self, image: Image.Image) -> None:
         self.inner.show_partial(to_panel_image(image, self.rotation))
+
+    def set_thorough(self, on: bool) -> None:
+        self.inner.set_thorough(on)
 
     def cleanup_due(self) -> bool:
         return self.inner.cleanup_due()

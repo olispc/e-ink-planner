@@ -3,11 +3,13 @@ reach the display? Run: python3 -m unittest discover tests"""
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -69,12 +71,12 @@ class StubDisplay:
         pass
 
 
-def make_panel(tasks, rotation: int = 0, state_path=None) -> Panel:
+def make_panel(tasks, rotation: int = 0, state_path=None, **config_kw) -> Panel:
     config = Config(
         url="http://stub", token="t", view="next", poll_seconds=300,
         check_seconds=5, display="png", touch="none",
         png_path=Path("/tmp/unused-panel-test.png"), touch_device="",
-        rotation=rotation, state_path=state_path,
+        rotation=rotation, state_path=state_path, **config_kw,
     )
     panel = Panel(config)
     panel.client = StubClient(tasks)
@@ -379,7 +381,7 @@ class TestDarkMode(unittest.TestCase):
         self.assertEqual(panel.display.shown[-1].getpixel((0, 0)), 0)
 
 
-class TestScreenLock(unittest.TestCase):
+class TestTouchLock(unittest.TestCase):
     def _panel(self, n=25):
         panel = make_panel([task(i) for i in range(n)])
         panel.refresh()
@@ -392,8 +394,8 @@ class TestScreenLock(unittest.TestCase):
 
     def test_locked_ignores_every_other_target(self):
         panel = self._panel()
-        self._tap(panel, "toggle_lock")
-        self.assertTrue(panel.locked)
+        self._tap(panel, "toggle_touch_lock")
+        self.assertTrue(panel.touch_locked)
         shown = len(panel.display.shown)
 
         for kind in ("complete", "open", "star", "list_page", "home", "sort_toggle",
@@ -409,40 +411,40 @@ class TestScreenLock(unittest.TestCase):
 
     def test_locked_ignores_swipes_and_taps_on_empty_space(self):
         panel = self._panel()
-        self._tap(panel, "toggle_lock")
+        self._tap(panel, "toggle_touch_lock")
         panel.handle_gesture(Gesture("swipe", 600, 200, dx=-300))
         panel.handle_gesture(Gesture("tap", 400, 20))
         self.assertEqual(panel.list_page, 0)
 
     def test_lock_button_unlocks_and_input_resumes(self):
         panel = self._panel()
-        self._tap(panel, "toggle_lock")
-        self._tap(panel, "toggle_lock")
-        self.assertFalse(panel.locked)
+        self._tap(panel, "toggle_touch_lock")
+        self._tap(panel, "toggle_touch_lock")
+        self.assertFalse(panel.touch_locked)
         self._tap(panel, "sort_toggle")
         self.assertTrue(panel.sort_newest)
 
     def test_background_refresh_still_updates_while_locked(self):
         panel = self._panel(3)
-        self._tap(panel, "toggle_lock")
+        self._tap(panel, "toggle_touch_lock")
         panel.client.tasks = panel.client.tasks[:2]
         panel.refresh()
         panel.draw(partial=True)
         self.assertEqual(len(panel.tasks), 2)
-        self.assertTrue(any(b.kind == "toggle_lock" for b in panel.hitboxes))
+        self.assertTrue(any(b.kind == "toggle_touch_lock" for b in panel.hitboxes))
 
     def test_detail_view_keeps_the_header_and_can_lock_and_unlock(self):
         panel = self._panel(3)
         self._tap(panel, "open")
         self.assertEqual(panel.mode, "detail")
 
-        self._tap(panel, "toggle_lock")
-        self.assertTrue(panel.locked)
+        self._tap(panel, "toggle_touch_lock")
+        self.assertTrue(panel.touch_locked)
         self.assertEqual(panel.mode, "detail")
         self._tap(panel, "back")                  # gated like everything else
         self.assertEqual(panel.mode, "detail")
 
-        self._tap(panel, "toggle_lock")
+        self._tap(panel, "toggle_touch_lock")
         self._tap(panel, "back")
         self.assertEqual(panel.mode, "list")
 
@@ -491,7 +493,7 @@ class TestPortraitPanel(unittest.TestCase):
         forward = max((b for b in panel.hitboxes if b.kind == "list_page"), key=lambda b: b.x0)
         panel.handle_tap((forward.x0 + 5, forward.y0 + 5))
         self.assertEqual(panel.list_page, 1)
-        self._tap(panel, "toggle_lock")
+        self._tap(panel, "toggle_touch_lock")
         shown = len(panel.display.shown)
         panel.handle_gesture(Gesture("swipe", 300, 400, dx=-200))
         self.assertEqual(len(panel.display.shown), shown)
@@ -583,7 +585,7 @@ class TestRotateButton(unittest.TestCase):
 
     def test_the_lock_blocks_it_like_everything_else(self):
         panel = self._panel()
-        self._tap(panel, "toggle_lock")
+        self._tap(panel, "toggle_touch_lock")
         shown = len(panel.display.shown)
         self._tap(panel, "toggle_rotate")
         self.assertEqual((panel.rotation, len(panel.display.shown)), (0, shown))
@@ -619,6 +621,192 @@ class TestRotateButton(unittest.TestCase):
             panel = self._panel(state_path=blocker / "state.json")   # parent is a file
             self._tap(panel, "toggle_rotate")
             self.assertEqual((panel.rotation, panel.display.shown[-1].size), (270, (480, 800)))
+
+
+class KindRecordingDisplay(StubDisplay):
+    """Remembers whether each frame was a partial, a full refresh, or a full
+    refresh while thorough mode was on (see Display.set_thorough)."""
+
+    def __init__(self):
+        super().__init__()
+        self.kinds = []
+        self.thorough = False
+
+    def set_thorough(self, on):
+        self.thorough = on
+
+    def show(self, image):
+        super().show(image)
+        self.kinds.append("thorough" if self.thorough else "full")
+
+    def show_partial(self, image):
+        super().show_partial(image)
+        self.kinds.append("partial")
+
+
+class TestScreenLock(unittest.TestCase):
+    """The lock screen: hides the list behind a clock, a passcode to get back."""
+
+    def _panel(self, passcode="2468", **kw):
+        panel = make_panel([task(i) for i in range(3)], passcode=passcode, **kw)
+        panel.display = KindRecordingDisplay()
+        panel.refresh()
+        panel.draw(force=True)
+        return panel
+
+    def _tap(self, panel, kind, key=None):
+        box = next(b for b in panel.hitboxes if b.kind == kind and (key is None or b.key == key))
+        panel.handle_tap((box.x0 + 5, box.y0 + 5))
+
+    def _type(self, panel, code):
+        for digit in code:
+            self._tap(panel, "lock_key", digit)
+
+    def _lock(self, panel):
+        self._tap(panel, "lock_screen")
+        self.assertTrue(panel.screen_locked)
+
+    def test_locking_is_a_thorough_refresh_so_no_ghost_of_the_list_is_left(self):
+        panel = self._panel()
+        self._lock(panel)
+        self.assertEqual(panel.display.kinds[-1], "thorough")
+        self.assertEqual({b.kind for b in panel.hitboxes}, {"lock_wake"})
+
+    def test_the_photo_is_always_painted_by_a_thorough_refresh(self):
+        panel = self._panel()
+        self._lock(panel)
+        kinds = panel.display.kinds
+        self.assertEqual(kinds[-1], "thorough")                                  # lock
+        self._tap(panel, "lock_wake");              self.assertEqual(kinds[-1], "partial")
+        self._tap(panel, "lock_key", "2");          self.assertEqual(kinds[-1], "partial")
+        self._tap(panel, "lock_key", "delete");     self.assertEqual(kinds[-1], "partial")
+        self._tap(panel, "lock_key", "cancel");     self.assertEqual(kinds[-1], "thorough")
+        self._tap(panel, "lock_wake")
+        n = len(kinds)
+        panel.lock_last_input -= 31
+        panel.tick()                                # keypad folds back to the clock
+        self.assertEqual(kinds[n:], ["thorough"])
+        panel.draw(force=True)                      # e.g. the idle cleanup, while locked
+        self.assertEqual(kinds[-1], "thorough")
+        self._tap(panel, "lock_wake")
+        self._type(panel, "2468")                   # unlock: partial, and thorough mode off
+        self.assertEqual(kinds[-1], "partial")
+        panel.draw(force=True)
+        self.assertEqual(kinds[-1], "full")
+
+    def test_starting_up_locked_paints_the_clock_thoroughly(self):
+        display = KindRecordingDisplay()
+        with mock.patch("panel.app.open_display", return_value=display):
+            panel = make_panel([task(1)], passcode="2468", start_locked=True)
+        panel.display = display      # make_panel swaps in a plain stub; put ours back
+        panel.refresh()
+        panel.draw(force=True)
+        self.assertEqual(display.kinds, ["thorough"])
+
+    def test_the_right_code_unlocks_back_to_the_same_list(self):
+        panel = self._panel()
+        self._lock(panel)
+        self._tap(panel, "lock_wake")
+        self.assertTrue(panel.lock_keypad)
+        self._type(panel, "2468")
+        self.assertFalse(panel.screen_locked)
+        self.assertIn("complete", {b.kind for b in panel.hitboxes})
+
+    def test_a_wrong_code_stays_locked_clears_and_says_so(self):
+        panel = self._panel()
+        self._lock(panel)
+        self._tap(panel, "lock_wake")
+        self._type(panel, "1111")
+        self.assertTrue(panel.screen_locked)
+        self.assertEqual((panel.lock_entry, panel.lock_message), ("", "Wrong code"))
+
+    def test_delete_and_cancel(self):
+        panel = self._panel()
+        self._lock(panel)
+        self._tap(panel, "lock_wake")
+        self._type(panel, "249")
+        self._tap(panel, "lock_key", "delete")
+        self.assertEqual(panel.lock_entry, "24")
+        self._type(panel, "68")
+        self.assertFalse(panel.screen_locked)
+
+        self._lock(panel)
+        self._tap(panel, "lock_wake")
+        self._type(panel, "24")
+        self._tap(panel, "lock_key", "cancel")
+        self.assertEqual((panel.lock_keypad, panel.lock_entry), (False, ""))
+        self.assertTrue(panel.screen_locked)
+
+    def test_nothing_else_works_while_locked(self):
+        panel = self._panel()
+        self._lock(panel)
+        panel.handle_gesture(Gesture("swipe", 600, 200, dx=-300))
+        self.assertTrue(panel.screen_locked)
+        # A stale hitbox from the list (a tap racing the redraw) is ignored.
+        panel.hitboxes = [replace(b, kind="complete", task_id="task-0") for b in panel.hitboxes]
+        panel.handle_tap((5, 5))
+        self.assertEqual(len(panel.tasks), 3)
+
+    def test_too_many_misses_start_a_cooldown_that_ignores_even_the_right_code(self):
+        panel = self._panel()
+        self._lock(panel)
+        self._tap(panel, "lock_wake")
+        for _ in range(5):
+            self._type(panel, "0000")
+        self.assertIn("Try again in 30 s", panel.lock_message)
+        self._type(panel, "2468")
+        self.assertTrue(panel.screen_locked)
+        # Once the cooldown is over, it works again.
+        panel.lock_blocked_until = 0.0
+        self._type(panel, "2468")
+        self.assertFalse(panel.screen_locked)
+        self.assertEqual(panel.lock_failures, 0)
+
+    def test_the_keypad_folds_away_after_a_while(self):
+        panel = self._panel()
+        self._lock(panel)
+        self._tap(panel, "lock_wake")
+        self._type(panel, "24")
+        panel.lock_last_input -= 31
+        panel.tick()
+        self.assertEqual((panel.lock_keypad, panel.lock_entry), (False, ""))
+        self.assertEqual({b.kind for b in panel.hitboxes}, {"lock_wake"})
+
+    def test_a_background_change_does_not_redraw_the_lock_screen(self):
+        panel = self._panel()
+        self._lock(panel)
+        shown = len(panel.display.shown)
+        panel.client.tasks = panel.client.tasks[:1]
+        panel.refresh()
+        panel.draw(partial=True)
+        self.assertEqual(len(panel.display.shown), shown)
+
+    def test_without_a_passcode_a_tap_unlocks(self):
+        panel = self._panel(passcode="")
+        self._lock(panel)
+        self._tap(panel, "lock_wake")
+        self.assertFalse(panel.screen_locked)
+
+    def test_starting_locked_shows_only_the_clock(self):
+        panel = self._panel(start_locked=True)
+        self.assertEqual({b.kind for b in panel.hitboxes}, {"lock_wake"})
+
+    def test_the_real_panel_always_starts_locked_whatever_was_saved(self):
+        # A reboot while unlocked — or a missing/damaged state file — must
+        # not be a way past the lock.
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "state.json"
+            for content in (None, '{"rotation": 270}', '{"screen_locked": false}', "garbage"):
+                if content is not None:
+                    state.write_text(content)
+                with mock.patch.dict(os.environ, {"PANEL_STATE_PATH": str(state)}):
+                    self.assertTrue(Config.from_env().start_locked, content)
+
+    def test_touch_lock_blocks_the_screen_lock_button_too(self):
+        panel = self._panel()
+        self._tap(panel, "toggle_touch_lock")
+        self._tap(panel, "lock_screen")
+        self.assertFalse(panel.screen_locked)
 
 
 if __name__ == "__main__":

@@ -94,6 +94,23 @@ COLLAPSED_FOOTER_H = 10
 PORTRAIT_HEADER_H = 112
 PORTRAIT_HEADER_ROW_H = 56    # the title/status row; controls fill the rest
 
+# The screen lock (panel/lockscreen.py). Keys are well past the ~9 mm tap floor
+# (landscape 96x84 px is ~20x17 mm) because a passcode typed on a wall is
+# typed standing up, often in a hurry, and a missed digit costs a whole retry.
+LOCK_KEY_W, LOCK_KEY_H = 96, 84          # landscape keypad, 3 x 4 keys
+LOCK_KEY_W_PORTRAIT, LOCK_KEY_H_PORTRAIT = 124, 92
+LOCK_KEY_GAP = 10
+LOCK_DOT = 16                             # one per digit entered (or expected)
+# How long the keypad stays up with no input before folding back to the
+# clock and forgetting a half-typed code.
+LOCK_KEYPAD_TIMEOUT = 30
+# Wrong guesses allowed before a cooldown, and how long that cooldown is
+# (doubling with each further miss, capped). Four digits are 10,000 codes;
+# this makes standing at the wall guessing them a matter of days, not minutes.
+LOCK_FREE_TRIES = 5
+LOCK_COOLDOWN_SECONDS = 30
+LOCK_COOLDOWN_MAX = 15 * 60
+
 
 @dataclass(frozen=True)
 class Geometry:
@@ -162,6 +179,10 @@ class Fonts:
         self.header_right = _font(_REGULAR, 20)
         self.footer = _font(_REGULAR, 14)
         self.empty = _font(_REGULAR, 28)
+        self.clock = _font(_BOLD, 128)
+        self.clock_small = _font(_BOLD, 88)
+        self.lock_date = _font(_REGULAR, 26)
+        self.key = _font(_REGULAR, 36)
 
 
 _FONTS: Optional[Fonts] = None

@@ -16,13 +16,17 @@ python3 -m panel.app                  # the real loop
 ## Non-negotiables
 
 **Design for 1-bit and for stillness.** Rendering happens in PIL mode `"1"`, not
-greyscale-then-threshold — no antialiasing, because the panel has none. A full
+greyscale-then-threshold — no antialiasing, because the panel has none. (The
+one exception is a lock-screen background photo, which is greyscale by nature
+and so is dithered, never thresholded; text is still drawn 1-bit on top.) A full
 refresh measured 1.73s with the fast waveform, 3.84s normal (2026-10-01). The vendored driver also does flicker-free partial refresh
 (confirmed against Waveshare's epd7in5_V2 source and its own demo — see
 `panel/display.py`), but repeated partial updates build up visible ghosting.
 So every update is partial — taps, their reconciles, background changes, poll
 ticks — and the full refresh (the black/white flash) is reserved for startup,
-the rotate button (everything moves, so a partial would ghost badly) and one
+the rotate button (everything moves, so a partial would ghost badly), engaging
+the screen lock (a ghost of the list is exactly what it must not leave, and
+its photo needs the thorough waveform — see screen lock below) and one
 scheduled cleanup: `EPaperDisplay.cleanup_due()`, which fires only
 once enough partials have accumulated *and* the panel has been idle for a
 while, so it never lands under a finger or right after a lone background
@@ -110,7 +114,8 @@ one paginated in full while the other gets crowded to zero.
 
 **Portrait is a second canvas, not a second layout.** Rotation (0/90/180/270)
 says how far the panel is turned clockwise as mounted. `PANEL_ROTATION` in
-`.env` is where it starts; the header's rotate button toggles landscape ↔
+`.env` is where it starts — 270 (portrait) when unset, since portrait is how the
+panel is mounted and used; the header's rotate button toggles landscape ↔
 portrait (UI turned 90° clockwise = rotation 270, `rotation.PORTRAIT_TURN`; 90 and
 180 stay `.env`-only) and saves the result to `local/state.json` (`PANEL_STATE_PATH`), which wins
 over `.env` from then on — a restart (crash, deploy) must not turn a mounted
@@ -130,7 +135,7 @@ tap rule stay in logical pixels. `tests/test_rotation.py` round-trips a marked
 pixel through both transforms for every rotation. Landscape output is
 pixel-identical to before the refactor (checked by diffing renders), so portrait
 changes nothing about it. Portrait's header is two rows — title/status/date, then
-the same eight controls spread in equal ~55px slots — because the landscape row
+the same nine controls spread in equal ~51px slots — because the landscape row
 is built for 800px; it shows ~10 list rows (6 landscape) and ~11 checklist
 items. Narrower text (~300px of title) means more ellipsis; wrapping long titles
 to two lines is the obvious next step if that bites on real tasks.
@@ -147,13 +152,13 @@ and a six-item list needs no pager at all.
 **The header holds real controls, not just a title — and it is the same bar
 on the list and the detail view.** `_draw_header()` draws both (title tap is
 "home" in the list, "back" in detail; everything right of it is identical), so
-lock and dark mode are reachable without leaving a task and the two bars can't
+the locks and dark mode are reachable without leaving a task and the two bars can't
 drift apart. The view toggles still apply to the list you return to.
 
 In the list, tapping the view title
 is "home" (list page back to 0 — the toggles below are deliberately left
 alone, since a stray tap on the title shouldn't undo a view you set up on
-purpose). Eight controls live in a fixed-position cluster at header-center,
+purpose). Nine controls live in a fixed-position cluster at header-center,
 anchored there rather than relative to the (variable-width) title or date
 text so neither can ever collide with it:
 - **focus-sticky** (star) — whether starred-today tasks pin to the top ahead
@@ -185,16 +190,43 @@ text so neither can ever collide with it:
   is a partial refresh like every other update — a whole-screen polarity flip
   is the case most likely to ghost, so if it does on the real panel, make this
   one toggle take the full-refresh path rather than loosening the rule above.
-- **screen lock** (padlock, open/closed glyph) — while locked, the lock button
-  is the only live tap target and swipes are dropped; the single gate is the
-  top of `Panel.handle_tap`, keyed on `box.kind`, so a new control can't
-  forget to check — "back" included, so a panel locked on a task's detail view
-  stays there until unlocked. Background refreshes still draw while locked.
-  In-memory like the other toggles: a restart unlocks and returns to light.
-- **rotate** (circular arrow, heavy border whenever the panel is turned from
-  native landscape) — toggles landscape ↔ portrait. Not like the other
+- **rotate** (circular arrow, heavy border in landscape — away from the portrait
+  default) — toggles landscape ↔ portrait. Not like the other
   toggles: it is saved across restarts, does a full refresh, and is gated by
-  the lock like everything else. See Portrait above.
+  the touch lock like everything else. See Portrait above.
+- **touch lock** (pointing hand, struck through when on) — while on, its own
+  button is the only live tap target and swipes are dropped; the single gate is
+  the top of `Panel.handle_tap`, keyed on `box.kind`, so a new control can't
+  forget to check — "back" included, so a panel touch-locked on a task's detail
+  view stays there until unlocked. Background refreshes still draw while it's
+  on. In-memory like the other toggles: a restart unlocks and returns to light.
+  For wiping the glass, not privacy — the tasks stay on show.
+- **screen lock** (closed padlock) — the privacy one: replaces the whole screen
+  with `panel/lockscreen.py`'s clock (time, date, no hint text, and a
+  background picture from `PANEL_LOCK_IMAGES` if there is one — one per day,
+  cropped to fill and dithered; text straight on the picture, nothing behind
+  it, and white keys. In portrait, the main orientation, the
+  clock sits at the top so the picture shows below it, so pictures meant for
+  the wall want to be vertical, ~3:5). A tap brings up a 3x4 keypad with
+  one dot per digit of `PANEL_PASSCODE`; the code is checked as soon as it's
+  the right length (no enter key), and after `LOCK_FREE_TRIES` misses each
+  further one starts a doubling cooldown. The keypad folds back to the clock
+  after `LOCK_KEYPAD_TIMEOUT` idle. Gated first in `handle_tap`, before the
+  touch lock: only `lock_wake`/`lock_key` boxes do anything. Its signature
+  carries no task data, only the minute and what the keypad shows, so the
+  clock ticks once a minute via `Panel.tick()` and a background change draws
+  nothing. While locked, the display
+  is in thorough mode (`Display.set_thorough`): *every* full refresh — a tap's,
+  the idle cleanup's, the partial-burst safety net's — takes the normal
+  waveform (~3.9s), because on the panel the fast one left the dithered photo
+  pale with earlier frames showing through, and partials drawn over that came
+  out as stencilled half-dark digits. The photo is always painted by one: on
+  locking, starting up locked, and folding back to the clock. Waking to the
+  keypad and unlocking stay partial (white keys cover the photo; partial back
+  to the list was fine on the panel), as do typed digits and minute ticks. The panel always *starts* locked (`Config.start_locked`, set by
+  `from_env`), so no reboot, pulled plug or lost state file is a way past it —
+  deliberately not saved state, which a restart while unlocked would bypass. No passcode set
+  means a tap unlocks — it still hides the list, said on stderr at startup.
 
 **Focus-sticky always wins when it's on** — starred-today tasks form their
 own flat leading section, sorted by `sort_newest` but never bucketed by

@@ -14,6 +14,7 @@ from typing import List, Optional, Sequence, Tuple
 from PIL import Image, ImageDraw, ImageOps
 
 from .client import Task
+from .rotation import is_portrait
 from .theme import (
     BLACK, BOX, BOX_X, COLLAPSED_FOOTER_H, DETAIL_BOX, DETAIL_BOX_Y_OFFSET,
     DETAIL_DESC_LINE_H, DETAIL_DESC_MIN_LINES_WITH_CHECKLIST, DETAIL_ROW_H,
@@ -57,9 +58,16 @@ class Hitbox:
     - "toggle_project_view" — flip project grouping
     - "toggle_due_first"  — flip whether due-dated backlog tasks lead
     - "toggle_dark"       — flip dark mode (whole screen inverted)
-    - "toggle_lock"       — flip the touch lock; the only thing a tap does
-                            while locked
+    - "toggle_touch_lock" — flip the touch lock; the only thing a tap does
+                            while it's on
+    - "lock_screen"       — hide the tasks behind the lock screen
     - "toggle_rotate"     — flip between landscape and portrait (full refresh)
+
+    And on the lock screen (panel/lockscreen.py), the only boxes it has:
+
+    - "lock_wake"         — the whole clock face: bring up the keypad
+    - "lock_key"          — one keypad key; `key` is "0"-"9", "cancel" or
+                            "delete"
     """
     kind: str
     x0: int
@@ -69,6 +77,7 @@ class Hitbox:
     task_id: Optional[str] = None
     item_id: Optional[str] = None
     page: Optional[int] = None
+    key: Optional[str] = None
 
     def contains(self, point: Tuple[int, int]) -> bool:
         x, y = point
@@ -285,27 +294,41 @@ def _draw_contrast_icon(d: ImageDraw.ImageDraw, x0: float, y0: float, size: floa
     d.pieslice(box, start=-90, end=90, fill=BLACK)
 
 
-def _draw_lock_icon(d: ImageDraw.ImageDraw, x0: float, y0: float, size: float, locked: bool) -> None:
-    """Padlock for the touch-lock toggle: solid body, shackle above it.
-    Locked, the shackle drops into the body on both sides; unlocked, it is
-    lifted clear with its right leg free — so the glyph itself changes, not
-    only the border around it."""
+def _draw_lock_icon(d: ImageDraw.ImageDraw, x0: float, y0: float, size: float) -> None:
+    """Closed padlock for the screen-lock button: solid body, shackle dropped
+    into it on both sides. One state only — once it's on, the lock screen
+    covers the header, so there is no "on" look to draw."""
     body_top = y0 + size * 0.45
     d.rectangle([x0 + size * 0.08, body_top, x0 + size * 0.92, y0 + size], fill=BLACK)
     left, right = x0 + size * 0.28, x0 + size * 0.72
-    lift = 0 if locked else size * 0.22
-    arc_top, arc_bottom = y0 - lift, y0 + size * 0.7 - lift
+    arc_top, arc_bottom = y0, y0 + size * 0.7
     d.arc([left, arc_top, right, arc_bottom], start=180, end=360, fill=BLACK, width=2)
     mid_y = (arc_top + arc_bottom) / 2
     d.line([(left, mid_y), (left, body_top)], fill=BLACK, width=2)
-    if locked:
-        d.line([(right, mid_y), (right, body_top)], fill=BLACK, width=2)
+    d.line([(right, mid_y), (right, body_top)], fill=BLACK, width=2)
+
+
+def _draw_pointer_icon(d: ImageDraw.ImageDraw, x0: float, y0: float, size: float, off: bool) -> None:
+    """The pointing hand a cursor turns into over something clickable, for the
+    touch-lock toggle: index finger up, fist below, thumb out to the left.
+    With touch locked it is struck through corner to corner — the glyph
+    itself says "touch is off", not only the heavier border around it."""
+    u = size
+    outline = [
+        (0.30, 0.50), (0.30, 0.10), (0.40, 0.00), (0.50, 0.10), (0.50, 0.42),
+        (0.92, 0.50), (0.98, 0.60), (0.98, 0.82), (0.84, 1.00), (0.40, 1.00),
+        (0.06, 0.66), (0.10, 0.56), (0.18, 0.56), (0.30, 0.68),
+    ]
+    d.polygon([(x0 + px * u, y0 + py * u) for px, py in outline], outline=BLACK, width=2)
+    if off:
+        d.line([(x0 - 2, y0 - 2), (x0 + u + 2, y0 + u + 2)], fill=BLACK, width=2)
 
 
 def _draw_rotate_icon(d: ImageDraw.ImageDraw, x0: float, y0: float, size: float) -> None:
     """A circular arrow — an almost-full circle with a head at its open end —
     for the rotate button. One glyph for every orientation; the box's border
-    weight says whether the panel is turned from its native landscape."""
+    weight says whether the panel is in landscape, away from its portrait
+    default."""
     cx, cy, r = x0 + size / 2, y0 + size / 2, size / 2
     end = 315  # degrees, clockwise from 3 o'clock; the gap is the arrow's mouth
     d.arc([x0, y0, x0 + size, y0 + size], start=25, end=end, fill=BLACK, width=2)
@@ -322,7 +345,7 @@ def _draw_rotate_icon(d: ImageDraw.ImageDraw, x0: float, y0: float, size: float)
 
 def _draw_toggle_box(d: ImageDraw.ImageDraw, x0: int, y0: int, size: int, icon: str, on: bool) -> None:
     """Small icon box for a header toggle (project/area grouping, due-date-
-    first, dark mode, touch lock, rotate) — same heavier-border-means-on
+    first, dark mode, touch lock, screen lock, rotate) — same heavier-border-means-on
     language as a focused task's checkbox, so a new control doesn't need a new
     visual vocabulary."""
     d.rectangle([x0, y0, x0 + size, y0 + size], outline=BLACK, width=3 if on else 1)
@@ -335,8 +358,10 @@ def _draw_toggle_box(d: ImageDraw.ImageDraw, x0: int, y0: int, size: int, icon: 
         _draw_calendar_icon(d, ix, iy, icon_size)
     elif icon == "dark":
         _draw_contrast_icon(d, ix, y0 + (size - icon_size) / 2, icon_size)
+    elif icon == "touch":
+        _draw_pointer_icon(d, ix, y0 + (size - icon_size) / 2, icon_size, on)
     elif icon == "lock":
-        _draw_lock_icon(d, ix, y0 + (size - icon_size) / 2 + 1, icon_size, on)
+        _draw_lock_icon(d, ix, y0 + (size - icon_size) / 2 + 1, icon_size)
     elif icon == "rotate":
         _draw_rotate_icon(d, ix, y0 + (size - icon_size) / 2, icon_size)
     else:
@@ -651,21 +676,21 @@ def _draw_header(
     group_by_project: bool = False,
     due_first: bool = False,
     dark: bool = False,
-    locked: bool = False,
+    touch_locked: bool = False,
     rotation: int = 0,
 ) -> List[Hitbox]:
     """The control bar, shared by the list and the detail view so the two can't
-    drift apart (and so the lock and dark toggles are reachable from either).
+    drift apart (and so the locks and dark toggle are reachable from either).
     `title_kind` is what a tap on the title does: "home" in the list, "back"
     in the detail view. The cluster and status text are the same in both —
     the view toggles don't change what a detail view shows, but they're the
     state the list will have when you go back, so they stay live.
 
-    Landscape is one row: title, then the eight controls at fixed positions,
+    Landscape is one row: title, then the nine controls at fixed positions,
     then status and date. Portrait (480px wide) can't fit that, so it is two:
-    title / status / date on top and the eight controls spread across the full
+    title / status / date on top and the nine controls spread across the full
     width beneath, one equal slot each — larger tap targets than landscape's.
-    The controls are the same eight in the same order either way."""
+    The controls are the same nine in the same order either way."""
     f = fonts()
     d.text((MARGIN, 20), title_text, font=f.header, fill=BLACK)
     title_w = _text_width(d, title_text, f.header)
@@ -688,18 +713,22 @@ def _draw_header(
     d.text((updated_text_x, 24), updated_text, font=f.footer, fill=BLACK)
 
     # Control positions as (centre x, half hit-width), in order: focus-sticky,
-    # sort, area, project, due, dark, lock, rotate. Landscape's are fixed absolute
+    # sort, area, project, due, dark, rotate, touch, lock. Landscape's are fixed absolute
     # positions rather than relative to the (variable-width) title or date, so
     # neither can ever collide with the cluster; portrait's are equal slots.
     if g.portrait:
-        slot = (g.text_right - MARGIN) / 8
-        controls = [(int(MARGIN + slot * (i + 0.5)), int(slot // 2)) for i in range(8)]
+        # Hit slots run to 10px from each edge, not MARGIN: nine slots inside
+        # the margins would be 48px, under the 50 a thumb wants, while the
+        # 28px boxes drawn at their centres still land inside the margins.
+        edge = MARGIN // 2
+        slot = (g.width - 2 * edge) / 9
+        controls = [(int(edge + slot * (i + 0.5)), int(slot // 2)) for i in range(9)]
         ctrl_y = PORTRAIT_HEADER_ROW_H + (g.header_h - 8 - PORTRAIT_HEADER_ROW_H) // 2
         hit_y0, title_y1 = PORTRAIT_HEADER_ROW_H, PORTRAIT_HEADER_ROW_H
         home_x1 = min(MARGIN + title_w + 16, updated_text_x - 8)
     else:
         step = GROUP_TOGGLE_BOX + 8
-        centres = [212, 246] + [276 + step * i + GROUP_TOGGLE_BOX // 2 for i in range(6)]
+        centres = [212, 246] + [276 + step * i + GROUP_TOGGLE_BOX // 2 for i in range(7)]
         controls = [(c, 16 if i < 2 else GROUP_TOGGLE_BOX // 2 + 4) for i, c in enumerate(centres)]
         ctrl_y = 30
         hit_y0, title_y1 = 0, g.header_h
@@ -721,18 +750,22 @@ def _draw_header(
     hitboxes.append(Hitbox("focus_sticky", star_c - star_hw, star_c + star_hw, hit_y0, g.header_h))
     hitboxes.append(Hitbox("sort_toggle", arrow_c - arrow_hw, arrow_c + arrow_hw, hit_y0, g.header_h))
 
-    # View controls (area / project / due) first, then display and input
-    # (dark / lock / rotate): the latter change how the panel looks and whether
-    # it listens, not what the list contains. Rotate's border is heavy whenever
-    # the panel is turned from native landscape, like any other "on".
+    # View controls (area / project / due) first, then display (dark /
+    # rotate), then input (touch lock / screen lock): the latter change how the
+    # panel looks and whether it listens, not what the list contains. The two
+    # locks sit together at the far right, screen lock outermost. Rotate's
+    # border is heavy in landscape — away from the portrait default — like any
+    # other "on"; the screen lock's never is, since the lock screen hides the
+    # header.
     box_y = ctrl_y - GROUP_TOGGLE_BOX // 2
     for (cx, hw), (icon, on, kind) in zip(boxes, [
         ("area", group_by_area, "toggle_area_view"),
         ("project", group_by_project, "toggle_project_view"),
         ("due", due_first, "toggle_due_first"),
         ("dark", dark, "toggle_dark"),
-        ("lock", locked, "toggle_lock"),
-        ("rotate", rotation != 0, "toggle_rotate"),
+        ("rotate", not is_portrait(rotation), "toggle_rotate"),
+        ("touch", touch_locked, "toggle_touch_lock"),
+        ("lock", False, "lock_screen"),
     ]):
         _draw_toggle_box(d, cx - GROUP_TOGGLE_BOX // 2, box_y, GROUP_TOGGLE_BOX, icon, on)
         hitboxes.append(Hitbox(kind, cx - hw, cx + hw, hit_y0, g.header_h))
@@ -756,7 +789,7 @@ def render(
     due_first: bool = False,
     group_order: Optional[dict] = None,
     dark: bool = False,
-    locked: bool = False,
+    touch_locked: bool = False,
     portrait: bool = False,
     rotation: int = 0,
 ) -> Rendered:
@@ -790,7 +823,7 @@ def render(
         not_fetched=total - len(all_tasks),
         sort_newest=sort_newest, focus_sticky=focus_sticky,
         group_by_area=group_by_area, group_by_project=group_by_project,
-        due_first=due_first, dark=dark, locked=locked, rotation=rotation,
+        due_first=due_first, dark=dark, touch_locked=touch_locked, rotation=rotation,
     )
 
     # --- rows -----------------------------------------------------------
@@ -930,7 +963,7 @@ def render(
 
 def render_detail(
     task: Task, completing: bool = False, expanded: bool = False, page: int = 0,
-    now: Optional[datetime] = None, dark: bool = False, locked: bool = False,
+    now: Optional[datetime] = None, dark: bool = False, touch_locked: bool = False,
     sort_newest: bool = False, focus_sticky: bool = True, group_by_area: bool = False,
     group_by_project: bool = False, due_first: bool = False, portrait: bool = False,
     rotation: int = 0,
@@ -961,7 +994,7 @@ def render_detail(
         d, g, now, "< BACK", "back",
         sort_newest=sort_newest, focus_sticky=focus_sticky,
         group_by_area=group_by_area, group_by_project=group_by_project,
-        due_first=due_first, dark=dark, locked=locked, rotation=rotation,
+        due_first=due_first, dark=dark, touch_locked=touch_locked, rotation=rotation,
     )
 
     # --- title + the task's own checkbox and star ---------------------------

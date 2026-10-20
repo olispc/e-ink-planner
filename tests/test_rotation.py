@@ -137,11 +137,11 @@ class TestConfigRotation(unittest.TestCase):
         with mock.patch.dict(os.environ, {"PANEL_ROTATION": raw, "PANEL_STATE_PATH": str(self.state)}):
             return Config.from_env().rotation
 
-    def test_defaults_to_landscape(self):
+    def test_defaults_to_portrait(self):
         env = {k: v for k, v in os.environ.items() if k != "PANEL_ROTATION"}
         env["PANEL_STATE_PATH"] = str(self.state)
         with mock.patch.dict(os.environ, env, clear=True):
-            self.assertEqual(Config.from_env().rotation, 0)
+            self.assertEqual(Config.from_env().rotation, 270)
 
     def test_what_the_button_saved_beats_env_after_a_restart(self):
         save_rotation(self.state, 270)

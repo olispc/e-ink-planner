@@ -7,12 +7,14 @@ live mindwtr-cloud if you point it at one.
     python3 tools/preview.py
     python3 tools/preview.py --live --view focus
     python3 tools/preview.py --scale 1     # actual panel pixels
+    python3 tools/preview.py --lock keypad --lock-image some.jpg
 """
 from __future__ import annotations
 
 import argparse
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -20,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from panel.client import ChecklistItem, MindwtrClient, Task, _parse_iso  # noqa: E402
 from panel.config import Config  # noqa: E402
 from panel.layout import render  # noqa: E402
+from panel.lockscreen import load_background, pick_background, render_lock  # noqa: E402
 from panel.rotation import is_portrait  # noqa: E402
 
 FIXTURE = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "tasks.json"
@@ -54,9 +57,14 @@ def main() -> int:
     ap.add_argument("--fixture", type=Path, default=FIXTURE)
     ap.add_argument("--out", type=Path, default=Path("local/preview.png"))
     ap.add_argument("--dark", action="store_true", help="dark mode (inverted)")
-    ap.add_argument("--locked", action="store_true", help="draw the lock as engaged")
+    ap.add_argument("--touch-locked", action="store_true", help="draw the touch lock as engaged")
+    ap.add_argument("--lock", choices=["face", "keypad"],
+                    help="draw the lock screen instead of the list")
+    ap.add_argument("--lock-image", type=Path,
+                    help="lock-screen background (default: today's from PANEL_LOCK_IMAGES)")
     ap.add_argument("--portrait", action="store_true",
-                    help="480x800 portrait (also on when PANEL_ROTATION is 90 or 270)")
+                    help="480x800 portrait (also on when PANEL_ROTATION is 90 or 270, the default)")
+    ap.add_argument("--landscape", action="store_true", help="800x480, whatever PANEL_ROTATION says")
     ap.add_argument("--scale", type=int, default=1, help="upscale for screen viewing")
     args = ap.parse_args()
 
@@ -68,10 +76,20 @@ def main() -> int:
     else:
         tasks = from_fixture(args.fixture)
 
-    portrait = args.portrait or is_portrait(config.rotation)
-    image = render(
-        tasks, view, total=len(tasks), dark=args.dark, locked=args.locked, portrait=portrait
-    ).image
+    portrait = args.portrait or (is_portrait(config.rotation) and not args.landscape)
+    if args.lock:
+        size = (480, 800) if portrait else (800, 480)
+        source = args.lock_image or pick_background(config.lock_images, datetime.now())
+        image = render_lock(
+            portrait=portrait, keypad=args.lock == "keypad", entered=2,
+            code_length=len(config.passcode) or 4, dark=args.dark,
+            background=load_background(source, size),
+        ).image
+    else:
+        image = render(
+            tasks, view, total=len(tasks), dark=args.dark, touch_locked=args.touch_locked,
+            portrait=portrait, rotation=270 if portrait else 0,
+        ).image
     if args.scale > 1:
         image = image.convert("L").resize(
             (image.width * args.scale, image.height * args.scale)

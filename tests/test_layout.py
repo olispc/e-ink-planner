@@ -44,7 +44,7 @@ def item(n: int, completed: bool = False, title: str = None) -> ChecklistItem:
 # nothing tappable".
 HEADER_CONTROL_KINDS = {
     "home", "focus_sticky", "sort_toggle", "toggle_project_view", "toggle_area_view",
-    "toggle_due_first", "toggle_dark", "toggle_lock", "toggle_rotate",
+    "toggle_due_first", "toggle_dark", "toggle_touch_lock", "lock_screen", "toggle_rotate",
 }
 
 
@@ -780,13 +780,13 @@ class TestHeaderCluster(unittest.TestCase):
     def test_dark_and_lock_controls_are_present_in_the_list_header(self):
         kinds = {b.kind for b in self._header_boxes("next")}
         self.assertIn("toggle_dark", kinds)
-        self.assertIn("toggle_lock", kinds)
+        self.assertIn("toggle_touch_lock", kinds)
 
     def test_header_controls_stay_clear_of_the_updated_status(self):
         # Rightmost control must end before the "updated" text, in
         # the worst case (the widest date string). Pixels in that gap are blank.
         r = render([task(1)], "next", now=datetime(2026, 12, 28, 9, 0))
-        rightmost = next(b for b in r.hitboxes if b.kind == "toggle_rotate")
+        rightmost = next(b for b in r.hitboxes if b.kind == "lock_screen")
         gap = r.image.crop((rightmost.x1, 10, rightmost.x1 + 12, 54))
         self.assertTrue(all(p == WHITE or p == 255 for p in gap.getdata()))
 
@@ -814,9 +814,9 @@ class TestHeaderCluster(unittest.TestCase):
 
     def test_locked_changes_only_the_lock_glyph_and_nothing_hittable(self):
         a = render([task(1)], "next", now=datetime(2026, 10, 15, 9, 0))
-        b = render([task(1)], "next", now=datetime(2026, 10, 15, 9, 0), locked=True)
+        b = render([task(1)], "next", now=datetime(2026, 10, 15, 9, 0), touch_locked=True)
         self.assertEqual(a.hitboxes, b.hitboxes)
-        lock = next(h for h in a.hitboxes if h.kind == "toggle_lock")
+        lock = next(h for h in a.hitboxes if h.kind == "toggle_touch_lock")
         diff = [i for i, (p, q) in enumerate(zip(a.image.getdata(), b.image.getdata())) if p != q]
         self.assertTrue(diff)
         for i in diff:
@@ -829,7 +829,7 @@ class TestPortrait(unittest.TestCase):
     """480x800: the same UI on a taller canvas, with a two-row header."""
 
     CONTROLS = {"focus_sticky", "sort_toggle", "toggle_area_view", "toggle_project_view",
-                "toggle_due_first", "toggle_dark", "toggle_lock", "toggle_rotate"}
+                "toggle_due_first", "toggle_dark", "toggle_touch_lock", "lock_screen", "toggle_rotate"}
 
     def tasks(self, n=14):
         return [task(i, title="Task %d" % i) for i in range(n)]
@@ -856,7 +856,7 @@ class TestPortrait(unittest.TestCase):
     def test_controls_are_big_equal_slots_that_do_not_overlap_the_title_row(self):
         rendered = render(self.tasks(), "next", portrait=True)
         controls = sorted((b for b in rendered.hitboxes if b.kind in self.CONTROLS), key=lambda b: b.x0)
-        self.assertEqual(len(controls), 8)
+        self.assertEqual(len(controls), 9)
         for a, b in zip(controls, controls[1:]):
             self.assertLessEqual(a.x1, b.x0)           # no overlap
         for b in controls:
