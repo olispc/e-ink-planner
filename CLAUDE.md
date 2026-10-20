@@ -9,19 +9,25 @@ phone sync to) and the renderer that drives the panel.
 ```bash
 python3 tools/preview.py --scale 2    # render the layout to a PNG, no hardware
 python3 tools/preview.py --live       # ...against a real mindwtr-cloud
+python3 tools/preview.py --portrait   # the 480x800 layout (tools/webtest.py takes it too)
 python3 -m panel.app                  # the real loop
 ```
 
 ## Non-negotiables
 
 **Design for 1-bit and for stillness.** Rendering happens in PIL mode `"1"`, not
-greyscale-then-threshold — no antialiasing, because the panel has none. A full
+greyscale-then-threshold — no antialiasing, because the panel has none. (The
+one exception is a lock-screen background photo, which is greyscale by nature
+and so is dithered, never thresholded; text is still drawn 1-bit on top.) A full
 refresh measured 1.73s with the fast waveform, 3.84s normal (2026-10-01). The vendored driver also does flicker-free partial refresh
 (confirmed against Waveshare's epd7in5_V2 source and its own demo — see
 `panel/display.py`), but repeated partial updates build up visible ghosting.
 So every update is partial — taps, their reconciles, background changes, poll
-ticks — and the full refresh (the black/white flash) is reserved for startup
-and one scheduled cleanup: `EPaperDisplay.cleanup_due()`, which fires only
+ticks — and the full refresh (the black/white flash) is reserved for startup,
+the rotate button (everything moves, so a partial would ghost badly), engaging
+the screen lock (a ghost of the list is exactly what it must not leave, and
+its photo needs the thorough waveform — see screen lock below) and one
+scheduled cleanup: `EPaperDisplay.cleanup_due()`, which fires only
 once enough partials have accumulated *and* the panel has been idle for a
 while, so it never lands under a finger or right after a lone background
 change. `FULL_REFRESH_EVERY` is only a safety net for a long unbroken burst. No continuous animation, no cursor, no
@@ -36,6 +42,12 @@ eyeballing a specimen page. `theme.py`'s font-candidate lists put it first
 on both platforms, so a Mac dev preview renders identically to the Pi
 instead of each OS falling back to whatever it ships (DejaVu/Helvetica/
 Arial stay as a safety net after it).
+
+**Never start the panel on wiring that doesn't read right.** `epd.init()`
+runs the controller's boost converter (±20V on the drive lines), which a
+shifted or mirrored 24-pin ribbon delivers to 3.3V pins. `require_idle_busy()`
+resets the panel and refuses to start unless BUSY reads idle-high — keep it
+ahead of any new init path.
 
 **Never blank on failure.** The image persists with the power off, so a dead
 network must show the last good list *labelled offline*, not an empty screen or
@@ -53,12 +65,17 @@ task, so a filled box reads as done. Focused rows get a heavier border instead.
 **One tap-zone boundary, reused everywhere.** `theme.TEXT_X` splits every row
 in the app: x < TEXT_X is always the checkbox column (complete a task, toggle
 a checklist item, or — in the header — go back), x >= TEXT_X is always the
-text (open a task's detail view, or nothing further for a leaf checklist
-item, which has no next level to open). Tapping a task's title opens
+text (open a task's detail view, or unfold a checklist item too long for
+one line). Tapping a task's title opens
 `render_detail()` — full title, meta, the full description (not a snippet —
 see below), and its checklist if it has one, unchecked items sorted to the
-top. Checklist items get a full-width tap zone (not split) since a leaf
-item has only one action.
+top. Checklist items split at `TEXT_X` too: only the checkbox column ticks,
+so the text is free for unfolding. An item that doesn't fit one line ends
+in a small ▼; tapping its text wraps it in full (▲ folds it back), the row
+growing by `DETAIL_ITEM_LINE_H` per line. `Panel.expanded_items` holds which
+are open and resets on "open". Rows therefore pack into pages by height
+(`_pack_pages()`), and the `expand_item` hitbox carries the page the item
+lands on once flipped, so unfolding never pushes it off the page you're on.
 A task row (list or detail title) adds a third, physically separate column
 at the far right — `theme.STAR_ZONE_W` — for starring: a third gesture on
 top of the existing two would need tap-vs-long-press disambiguation, exactly
@@ -85,7 +102,10 @@ a screen with no pager ignores it. `touch.classify()` decides tap vs swipe
 from the stroke's start and end: under `TAP_SLOP` is a tap (at the landing
 point), over `SWIPE_MIN_DX` and mostly sideways is a swipe, anything else is
 dropped — so a vertical drag no longer fires a tap where the finger lifted.
-Page turns are partial refreshes like every other update.
+Page turns are partial refreshes like every other update. On a task's
+detail view a right swipe from its first page (or with no pager) is "back"
+instead of wrapping to the last page — it borrows the header's `back` box
+the same way, so the touch lock gates it like the tap.
 
 **The detail view's description gets real space, not one truncated line —
 but never at the checklist's expense.** `_wrap_paragraphs()` wraps the whole
@@ -100,10 +120,53 @@ its own pager: only one pager fits on screen, and a task with both a long
 description and a long checklist needs a guaranteed minimum of *each*, not
 one paginated in full while the other gets crowded to zero.
 
-**The header holds real controls, not just a title.** Tapping the view title
+**Portrait is a second canvas, not a second layout.** Rotation (0/90/180/270)
+says how far the panel is turned clockwise as mounted. `PANEL_ROTATION` in
+`.env` is where it starts — 270 (portrait) when unset, since portrait is how the
+panel is mounted and used; the header's rotate button toggles landscape ↔
+portrait (UI turned 90° clockwise = rotation 270, `rotation.PORTRAIT_TURN`; 90 and
+180 stay `.env`-only) and saves the result to `local/state.json` (`PANEL_STATE_PATH`), which wins
+over `.env` from then on — a restart (crash, deploy) must not turn a mounted
+panel sideways. `Config.from_env` says so on stderr when the saved value
+overrides an explicit `PANEL_ROTATION`; delete the file to hand control back to
+`.env`. Rotating is a full refresh and resets list/checklist page to 0 (a page
+holds a different number of rows on the other canvas). The tester and the unit
+tests run with `state_path=None` and never write it. The UI is always drawn upright on a *logical* canvas —
+800x480, or 480x800 for 90/270 — via `theme.Geometry` (`LANDSCAPE`/`PORTRAIT`),
+which `render()`/`render_detail()` read their width, header height and text
+edge from instead of module constants. Only the two edges know about rotation,
+and both live in `panel/rotation.py` so they cannot disagree: `RotatedDisplay`
+turns the finished image onto the native frame (e-paper only — the png backend
+stays upright), and `EvdevTouch` turns raw touch points back before classifying,
+so a swipe is judged in the frame the user sees. Hitboxes, `Panel` and every
+tap rule stay in logical pixels. `tests/test_rotation.py` round-trips a marked
+pixel through both transforms for every rotation. Landscape output is
+pixel-identical to before the refactor (checked by diffing renders), so portrait
+changes nothing about it. Portrait's header is two rows — title/status/date, then
+the same nine controls spread in equal ~51px slots — because the landscape row
+is built for 800px; it shows ~10 list rows (6 landscape) and ~11 checklist
+items. Narrower text (~300px of title) means more ellipsis; wrapping long titles
+to two lines is the obvious next step if that bites on real tasks.
+TODO(oli): confirm on the panel that 270 (UI turned clockwise) matches how it's mounted.
+
+**The detail view spends nothing on a footer.** It is a bare rule, like the
+list's collapsed one, and checklist progress ("N of M done") sits right-aligned
+on the meta line instead. Its pager is the list's thin `PAGER_H` strip below the
+rows rather than a whole row's height, so paging costs less than one item. Rows
+stay `DETAIL_ROW_H` (46px, the ~9mm tap floor) — the space came from around the
+rows, not from shrinking them: six checklist items fit per page (four before),
+and a six-item list needs no pager at all.
+
+**The header holds real controls, not just a title — and it is the same bar
+on the list and the detail view.** `_draw_header()` draws both (title tap is
+"home" in the list, "back" in detail; everything right of it is identical), so
+the locks and dark mode are reachable without leaving a task and the two bars can't
+drift apart. The view toggles still apply to the list you return to.
+
+In the list, tapping the view title
 is "home" (list page back to 0 — the toggles below are deliberately left
 alone, since a stray tap on the title shouldn't undo a view you set up on
-purpose). Five toggles live in a fixed-position cluster at header-center,
+purpose). Nine controls live in a fixed-position cluster at header-center,
 anchored there rather than relative to the (variable-width) title or date
 text so neither can ever collide with it:
 - **focus-sticky** (star) — whether starred-today tasks pin to the top ahead
@@ -127,6 +190,51 @@ text so neither can ever collide with it:
   `_sort_backlog()` is what due-first changes, and the focus-sticky leading
   section always sorts through plain `_sort_by_date` instead, so a starred
   task never gets bumped by an unstarred one with a nearer due date.
+- **dark mode** (half-filled circle) — the finished light render inverted
+  (`_finish()` in layout.py), not a second palette threaded through every
+  draw call, so layout, hitboxes and glyphs cannot drift between the two
+  modes. Inversion goes via mode `"L"` because `WHITE` is 1 here and PIL's own
+  invert on mode `"1"` leaves stray bits. Applies to the detail view too, and
+  is a partial refresh like every other update — a whole-screen polarity flip
+  is the case most likely to ghost, so if it does on the real panel, make this
+  one toggle take the full-refresh path rather than loosening the rule above.
+- **rotate** (circular arrow, heavy border in landscape — away from the portrait
+  default) — toggles landscape ↔ portrait. Not like the other
+  toggles: it is saved across restarts, does a full refresh, and is gated by
+  the touch lock like everything else. See Portrait above.
+- **touch lock** (pointing hand, struck through when on) — while on, its own
+  button is the only live tap target and swipes are dropped; the single gate is
+  the top of `Panel.handle_tap`, keyed on `box.kind`, so a new control can't
+  forget to check — "back" included, so a panel touch-locked on a task's detail
+  view stays there until unlocked. Background refreshes still draw while it's
+  on. In-memory like the other toggles: a restart unlocks and returns to light.
+  For wiping the glass, not privacy — the tasks stay on show.
+- **screen lock** (closed padlock) — the privacy one: replaces the whole screen
+  with `panel/lockscreen.py`'s clock (time, date, no hint text, and a
+  background picture from `PANEL_LOCK_IMAGES` if there is one — one per day,
+  cropped to fill and dithered; text straight on the picture, nothing behind
+  it, and white keys. In portrait, the main orientation, the
+  clock sits at the top so the picture shows below it, so pictures meant for
+  the wall want to be vertical, ~3:5). A tap brings up a 3x4 keypad with
+  one dot per digit of `PANEL_PASSCODE`; the code is checked as soon as it's
+  the right length (no enter key), and after `LOCK_FREE_TRIES` misses each
+  further one starts a doubling cooldown. The keypad folds back to the clock
+  after `LOCK_KEYPAD_TIMEOUT` idle. Gated first in `handle_tap`, before the
+  touch lock: only `lock_wake`/`lock_key` boxes do anything. Its signature
+  carries no task data, only the minute and what the keypad shows, so the
+  clock ticks once a minute via `Panel.tick()` and a background change draws
+  nothing. While locked, the display
+  is in thorough mode (`Display.set_thorough`): *every* full refresh — a tap's,
+  the idle cleanup's, the partial-burst safety net's — takes the normal
+  waveform (~3.9s), because on the panel the fast one left the dithered photo
+  pale with earlier frames showing through, and partials drawn over that came
+  out as stencilled half-dark digits. The photo is always painted by one: on
+  locking, starting up locked, and folding back to the clock. Waking to the
+  keypad and unlocking stay partial (white keys cover the photo; partial back
+  to the list was fine on the panel), as do typed digits and minute ticks. The panel always *starts* locked (`Config.start_locked`, set by
+  `from_env`), so no reboot, pulled plug or lost state file is a way past it —
+  deliberately not saved state, which a restart while unlocked would bypass. No passcode set
+  means a tap unlocks — it still hides the list, said on stderr at startup.
 
 **Focus-sticky always wins when it's on** — starred-today tasks form their
 own flat leading section, sorted by `sort_newest` but never bucketed by
@@ -150,11 +258,12 @@ it until a header toggle or the home tap drops it; groups that appear in
 between go after the known ones. Tasks within a group need no freezing —
 removing one never reorders the rest.
 
-**Header status text is not a 5th control.** "updated HH:MM" plus a small
-sync glyph sits next to the date on the right — deliberately smaller (footer
-font, a 12px icon vs. the controls' 20px) and grouped with the read-only
-date/count instead of the tappable cluster, so it reads as status, not
-another toggle.
+**Header status text is not a control.** "upd HH:MM" sits next to the
+date on the right (just "Sat 17": both are short on purpose, header width being
+the scarce thing) — deliberately smaller (footer font vs. the controls' 20px
+icons) and grouped with the read-only date instead of the tappable cluster, so
+it reads as status, not another toggle. No sync glyph and no task count: both
+were spending header width on things the list itself already shows.
 
 **Checklist writes are whole-array, not per-item.** Mindwtr's schema (verified
 against `packages/core/src/task-sync-schema.ts`) has no per-item toggle route
@@ -200,5 +309,5 @@ doesn't depend on time-of-day.
 ## Where the detail lives
 
 - `deploy/README.md` — provisioning the Pi, sync server, overlay, wiring
-- `deploy/overlays/gt911-epaper.dts` — why touch needs a device-tree overlay
+- `deploy/overlays/` — why touch needs a device-tree overlay, one per touch chip
 - `panel/theme.py` — every layout number, and the physical reason for it

@@ -13,7 +13,8 @@ from panel.layout import (  # noqa: E402
     _format_due, _organize_tasks, _relative_age, compute_group_order, hit, render, render_detail,
 )
 from panel.theme import (  # noqa: E402
-    BLACK, DETAIL_DESC_MIN_LINES_WITH_CHECKLIST, HEADER_H, HEIGHT, MARGIN, ROW_H, ROWS,
+    BLACK, COLLAPSED_FOOTER_H, DETAIL_DESC_MIN_LINES_WITH_CHECKLIST, HEADER_H, HEIGHT,
+    MARGIN, ROW_H, ROWS,
     STAR_ZONE_W, TEXT_RIGHT, TEXT_X, WHITE, WIDTH,
 )
 
@@ -38,12 +39,12 @@ def item(n: int, completed: bool = False, title: str = None) -> ChecklistItem:
 
 
 # The header's own controls (home, focus-sticky, sort direction, area/
-# project/due toggles) are always present regardless of task content — real,
+# project/due toggles, dark mode, lock) are always present regardless of task content — real,
 # static hitboxes, not something tests should mistake for "the header has
 # nothing tappable".
 HEADER_CONTROL_KINDS = {
     "home", "focus_sticky", "sort_toggle", "toggle_project_view", "toggle_area_view",
-    "toggle_due_first",
+    "toggle_due_first", "toggle_dark", "toggle_touch_lock", "lock_screen", "toggle_rotate",
 }
 
 
@@ -534,10 +535,31 @@ class TestDetailRendering(unittest.TestCase):
         rendered = render_detail(task(1))
         self.assertEqual([b for b in rendered.hitboxes if b.kind == "toggle"], [])
 
-    def test_header_tap_goes_back(self):
+    def test_six_checklist_items_fit_without_a_pager(self):
+        # The footer is a bare rule and progress rides the meta line, so a
+        # six-item checklist (a normal shopping list) needs no paging at all.
+        rendered = render_detail(task(1, checklist=[item(n) for n in range(6)]))
+        self.assertEqual(len([b for b in rendered.hitboxes if b.kind == "toggle"]), 6)
+        self.assertEqual([b for b in rendered.hitboxes if b.kind == "page"], [])
+
+    def test_paged_checklist_still_shows_six_rows_above_a_thin_pager(self):
+        rendered = render_detail(task(1, checklist=[item(n) for n in range(12)]))
+        self.assertEqual(len([b for b in rendered.hitboxes if b.kind == "toggle"]), 6)
+        pagers = [b for b in rendered.hitboxes if b.kind == "page"]
+        self.assertEqual(len(pagers), 2)
+        self.assertLessEqual(pagers[0].y1, HEIGHT - COLLAPSED_FOOTER_H)
+
+    def test_header_title_goes_back(self):
         rendered = render_detail(task(1))
-        box = hit(rendered.hitboxes, (400, 20))
+        box = hit(rendered.hitboxes, (20, 20))
         self.assertEqual(box.kind, "back")
+
+    def test_header_keeps_the_list_controls(self):
+        # The whole bar stays: same control hitboxes as the list's, so lock,
+        # dark and the view toggles are reachable without leaving the task.
+        detail = {b.kind for b in render_detail(task(1)).hitboxes if b.y0 == 0}
+        listing = {b.kind for b in render([task(1)], "next").hitboxes if b.y0 == 0}
+        self.assertEqual(detail, (listing - {"home"}) | {"back"})
 
     def test_title_checkbox_completes_the_task(self):
         rendered = render_detail(task(1))
@@ -549,13 +571,47 @@ class TestDetailRendering(unittest.TestCase):
         box = hit(rendered.hitboxes, (TEXT_RIGHT - 10, HEADER_H + 20))
         self.assertEqual((box.kind, box.task_id), ("star", "task-1"))
 
-    def test_checklist_item_toggle_is_full_width(self):
-        # A leaf item has one action, so unlike a task row its whole width
-        # (not just a checkbox column) should be tappable.
+    def test_checklist_item_toggle_is_only_the_checkbox_column(self):
+        # Same TEXT_X split as list rows: the text is left free for unfolding
+        # a long item, so a tap there must never tick it by accident.
         checklist = [item(0)]
         rendered = render_detail(task(1, checklist=checklist))
         toggle = next(b for b in rendered.hitboxes if b.kind == "toggle")
-        self.assertEqual((toggle.x0, toggle.x1), (0, WIDTH))
+        self.assertEqual((toggle.x0, toggle.x1), (0, TEXT_X))
+
+    def test_short_item_text_has_no_expand_zone(self):
+        rendered = render_detail(task(1, checklist=[item(0)]))
+        self.assertFalse([b for b in rendered.hitboxes if b.kind == "expand_item"])
+
+    def test_long_item_unfolds_to_a_taller_row(self):
+        long_title = " ".join(["word%d" % n for n in range(40)])
+        checklist = [item(0, title=long_title), item(1)]
+        folded = render_detail(task(1, checklist=checklist))
+        box = next(b for b in folded.hitboxes if b.kind == "expand_item")
+        self.assertEqual((box.item_id, box.x0, box.page), ("item-0", TEXT_X, 0))
+        unfolded = render_detail(task(1, checklist=checklist), expanded_items=frozenset({"item-0"}))
+        def row_h(r):
+            return next(b for b in r.hitboxes if b.kind == "toggle" and b.item_id == "item-0")
+        self.assertGreater(row_h(unfolded).y1 - row_h(unfolded).y0, row_h(folded).y1 - row_h(folded).y0)
+        # The next item moves down by exactly the extra height.
+        def y_of(r, item_id):
+            return next(b.y0 for b in r.hitboxes if b.kind == "toggle" and b.item_id == item_id)
+        self.assertGreater(y_of(unfolded, "item-1"), y_of(folded, "item-1"))
+
+    def test_unfolding_an_item_pushed_off_the_page_points_at_its_new_page(self):
+        long_title = " ".join(["word%d" % n for n in range(40)])
+        # Five short items then a long one: six fit one page folded, but the
+        # long one unfolded no longer fits under the other five.
+        checklist = [item(n) for n in range(5)] + [item(5, title=long_title)]
+        folded = render_detail(task(1, checklist=checklist))
+        self.assertFalse([b for b in folded.hitboxes if b.kind == "page"])
+        box = next(b for b in folded.hitboxes if b.kind == "expand_item")
+        self.assertEqual(box.page, 1)
+        unfolded = render_detail(
+            task(1, checklist=checklist), expanded_items=frozenset({"item-5"}), page=box.page,
+        )
+        self.assertTrue(any(b.kind == "toggle" and b.item_id == "item-5" for b in unfolded.hitboxes))
+        self.assertTrue([b for b in unfolded.hitboxes if b.kind == "page"])
 
     def test_completing_flash_changes_the_image(self):
         plain = render_detail(task(1)).image
@@ -741,6 +797,137 @@ class TestDetailRendering(unittest.TestCase):
         long_toggle = next(b for b in with_long.hitboxes if b.kind == "toggle")
         capped_toggle = next(b for b in with_capped.hitboxes if b.kind == "toggle")
         self.assertEqual(long_toggle.y0, capped_toggle.y0)
+
+
+class TestHeaderCluster(unittest.TestCase):
+    def _header_boxes(self, view):
+        r = render([task(1)], view)
+        return [b for b in r.hitboxes if b.y1 <= HEADER_H]
+
+    def test_header_hitboxes_never_overlap_for_any_view_title(self):
+        from panel.layout import VIEW_TITLES
+        for view in VIEW_TITLES:
+            boxes = sorted(self._header_boxes(view), key=lambda b: b.x0)
+            for a, b in zip(boxes, boxes[1:]):
+                self.assertLessEqual(a.x1, b.x0, "%s: %s overlaps %s" % (view, a.kind, b.kind))
+
+    def test_dark_and_lock_controls_are_present_in_the_list_header(self):
+        kinds = {b.kind for b in self._header_boxes("next")}
+        self.assertIn("toggle_dark", kinds)
+        self.assertIn("toggle_touch_lock", kinds)
+
+    def test_header_controls_stay_clear_of_the_updated_status(self):
+        # Rightmost control must end before the "updated" text, in
+        # the worst case (the widest date string). Pixels in that gap are blank.
+        r = render([task(1)], "next", now=datetime(2026, 12, 28, 9, 0))
+        rightmost = next(b for b in r.hitboxes if b.kind == "lock_screen")
+        gap = r.image.crop((rightmost.x1, 10, rightmost.x1 + 12, 54))
+        self.assertTrue(all(p == WHITE or p == 255 for p in gap.getdata()))
+
+    def test_dark_render_is_the_exact_inverse_with_identical_hitboxes(self):
+        tasks = [task(i) for i in range(3)]
+        light = render(tasks, "next", now=datetime(2026, 10, 15, 9, 0))
+        dark = render(tasks, "next", now=datetime(2026, 10, 15, 9, 0), dark=True)
+        self.assertEqual(light.hitboxes, dark.hitboxes)
+        self.assertEqual(dark.image.mode, "1")
+        # Everywhere except the dark button itself, whose border is heavier
+        # when on — that difference is the point, not an inversion error.
+        btn = next(h for h in light.hitboxes if h.kind == "toggle_dark")
+        lo, do = light.image.convert("L"), dark.image.convert("L")
+        for i, (a, b) in enumerate(zip(lo.getdata(), do.getdata())):
+            x, y = i % WIDTH, i // WIDTH
+            if btn.x0 <= x < btn.x1 and y < HEADER_H:
+                continue
+            self.assertEqual(a, 255 - b, "pixel (%d, %d)" % (x, y))
+
+    def test_detail_view_dark_is_inverted_too(self):
+        light = render_detail(task(1))
+        dark = render_detail(task(1), dark=True)
+        self.assertEqual(light.hitboxes, dark.hitboxes)
+        self.assertEqual(dark.image.getpixel((0, 0)), 0)
+
+    def test_locked_changes_only_the_lock_glyph_and_nothing_hittable(self):
+        a = render([task(1)], "next", now=datetime(2026, 10, 15, 9, 0))
+        b = render([task(1)], "next", now=datetime(2026, 10, 15, 9, 0), touch_locked=True)
+        self.assertEqual(a.hitboxes, b.hitboxes)
+        lock = next(h for h in a.hitboxes if h.kind == "toggle_touch_lock")
+        diff = [i for i, (p, q) in enumerate(zip(a.image.getdata(), b.image.getdata())) if p != q]
+        self.assertTrue(diff)
+        for i in diff:
+            x, y = i % WIDTH, i // WIDTH
+            self.assertTrue(lock.x0 <= x < lock.x1 and y < HEADER_H)
+
+
+
+class TestPortrait(unittest.TestCase):
+    """480x800: the same UI on a taller canvas, with a two-row header."""
+
+    CONTROLS = {"focus_sticky", "sort_toggle", "toggle_area_view", "toggle_project_view",
+                "toggle_due_first", "toggle_dark", "toggle_touch_lock", "lock_screen", "toggle_rotate"}
+
+    def tasks(self, n=14):
+        return [task(i, title="Task %d" % i) for i in range(n)]
+
+    def test_canvas_is_480_by_800_one_bit(self):
+        for rendered in (render(self.tasks(), "next", portrait=True),
+                         render_detail(task(1), portrait=True)):
+            self.assertEqual(rendered.image.size, (480, 800))
+            self.assertEqual(rendered.image.mode, "1")
+
+    def test_list_shows_more_rows_than_landscape(self):
+        def rows(portrait):
+            r = render(self.tasks(), "next", portrait=portrait)
+            return len([b for b in r.hitboxes if b.kind == "open"])
+        self.assertEqual(rows(False), 6)
+        self.assertGreaterEqual(rows(True), 10)
+
+    def test_the_header_has_the_same_eight_controls_as_landscape(self):
+        for rendered in (render(self.tasks(), "next", portrait=True),
+                         render_detail(task(1), portrait=True)):
+            kinds = {b.kind for b in rendered.hitboxes if b.y0 < 112}
+            self.assertEqual(kinds & self.CONTROLS, self.CONTROLS)
+
+    def test_controls_are_big_equal_slots_that_do_not_overlap_the_title_row(self):
+        rendered = render(self.tasks(), "next", portrait=True)
+        controls = sorted((b for b in rendered.hitboxes if b.kind in self.CONTROLS), key=lambda b: b.x0)
+        self.assertEqual(len(controls), 9)
+        for a, b in zip(controls, controls[1:]):
+            self.assertLessEqual(a.x1, b.x0)           # no overlap
+        for b in controls:
+            self.assertGreaterEqual(b.x1 - b.x0, 50)   # a real thumb target
+            self.assertGreaterEqual(b.y0, 56)          # below the title row
+        title = next(b for b in rendered.hitboxes if b.kind == "home")
+        self.assertLessEqual(title.y1, 56)
+
+    def test_every_hitbox_stays_on_the_canvas(self):
+        for rendered in (render(self.tasks(), "next", portrait=True),
+                         render(self.tasks(), "next", portrait=True, group_by_project=True),
+                         render_detail(task(1, checklist=[item(n) for n in range(30)]), portrait=True)):
+            for b in rendered.hitboxes:
+                self.assertTrue(0 <= b.x0 < b.x1 <= 480 and 0 <= b.y0 < b.y1 <= 800, b)
+
+    def test_longest_title_does_not_reach_the_status_text(self):
+        # "NEXT ACTIONS" is the widest title; its tap zone must stop before
+        # the "updated" text rather than run under it.
+        rendered = render(self.tasks(), "next", portrait=True)
+        title = next(b for b in rendered.hitboxes if b.kind == "home")
+        self.assertLess(title.x1, 300)
+
+    def test_detail_checklist_fits_more_items(self):
+        r = render_detail(task(1, checklist=[item(n) for n in range(30)]), portrait=True)
+        self.assertGreater(len([b for b in r.hitboxes if b.kind == "toggle"]), 6)
+
+    def test_taps_land_on_the_rows_that_were_drawn(self):
+        rendered = render(self.tasks(), "next", portrait=True)
+        box = next(b for b in rendered.hitboxes if b.kind == "open" and b.task_id == "task-3")
+        found = hit(rendered.hitboxes, ((box.x0 + box.x1) // 2, (box.y0 + box.y1) // 2))
+        self.assertEqual((found.kind, found.task_id), ("open", "task-3"))
+
+    def test_dark_portrait_is_the_inverted_light_render(self):
+        light = render(self.tasks(), "next", portrait=True).image
+        dark = render(self.tasks(), "next", portrait=True, dark=True).image
+        self.assertEqual(dark.getpixel((0, 0)), 0)
+        self.assertNotEqual(light.getpixel((0, 0)), 0)
 
 
 if __name__ == "__main__":

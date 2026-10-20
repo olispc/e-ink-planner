@@ -1,0 +1,59 @@
+/*
+ * FocalTech FT5426 capacitive touch on a Raspberry Pi 4, for the Good Display
+ * GDEY075T7-T01 panel through Good Display's ESP32-FTS02 adapter board.
+ *
+ * Panels of the same model ship with different touch chips: the first one
+ * had a GT911 (see gt911-epaper.dts), the replacement (2026-10-15) has a
+ * flex labelled SN-7F0323A-V1.0 carrying this chip. Found on the bench by
+ * bit-banging the bus after driving reset high: it answers at 0x38 with chip
+ * id 0x54 (register 0xA3), which the mainline `edt-ft5x06` driver lists as
+ * "focaltech,ft5426".
+ *   SDA   = GPIO6   (board pull-up)
+ *   SCL   = GPIO13  (board pull-up)
+ *   INT   = GPIO19
+ *   RST   = GPIO26  (Pi pin 37, FTS02 P7 pin 3) - required: the Pi's default
+ *           pull-down on GPIO26 holds this chip in reset, and with RST left
+ *           unwired it never answers at all.
+ *   addr  = 0x38
+ * Same software (i2c-gpio) bus as the GT911 overlay; see that file for why.
+ *
+ *   dtc -@ -I dts -O dtb -o ft5426-epaper.dtbo ft5426-epaper.dts
+ *   sudo cp ft5426-epaper.dtbo /boot/firmware/overlays/
+ *   # then in /boot/firmware/config.txt:
+ *   #   dtoverlay=ft5426-epaper
+ *   sudo reboot && evtest        # expect a generic FT5x06 device
+ */
+
+/dts-v1/;
+/plugin/;
+
+/ {
+    compatible = "brcm,bcm2711";
+
+    fragment@0 {
+        target-path = "/";
+        __overlay__ {
+            i2c_touch: i2c@6 {
+                reg = <0xffffffff>;
+                compatible = "i2c-gpio";
+                gpios = <&gpio 6 0      /* sda */
+                         &gpio 13 0>;   /* scl */
+                i2c-gpio,delay-us = <2>;    /* ~100 kHz */
+                #address-cells = <1>;
+                #size-cells = <0>;
+                status = "okay";
+
+                ft5426: touchscreen@38 {
+                    compatible = "focaltech,ft5426";
+                    reg = <0x38>;
+                    interrupt-parent = <&gpio>;
+                    interrupts = <19 2>;        /* falling edge: INT idles high */
+                    reset-gpios = <&gpio 26 1>; /* active low */
+                    touchscreen-size-x = <800>;
+                    touchscreen-size-y = <480>;
+                    status = "okay";
+                };
+            };
+        };
+    };
+};

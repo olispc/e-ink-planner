@@ -21,3 +21,6 @@ venv/
 
 # macOS
 .DS_Store
+
+# SketchUp autosave backups
+*~.skp

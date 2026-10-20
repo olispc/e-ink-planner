@@ -6,6 +6,7 @@ roughly 12.6 mm — comfortably past the ~9 mm minimum for a reliable thumb tap.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -35,8 +36,8 @@ TEXT_RIGHT = WIDTH - MARGIN
 # TEXT_X is the tap-zone boundary everywhere in the app, not just list-row
 # geometry: x < TEXT_X always means "the checkbox column" (complete a task,
 # toggle a checklist item, or — in the header — go back), x >= TEXT_X always
-# means "the text" (open a task's detail, or nothing further for a leaf
-# checklist item). One boundary, reused, keeps the tap model legible.
+# means "the text" (open a task's detail, or unfold a long checklist
+# item). One boundary, reused, keeps the tap model legible.
 
 # Checklist rows in the detail view get their own, smaller geometry: no
 # meta sub-line under each item, so more of them fit per screen than a task
@@ -44,6 +45,10 @@ TEXT_RIGHT = WIDTH - MARGIN
 DETAIL_ROW_H = 46
 DETAIL_BOX = 24
 DETAIL_BOX_Y_OFFSET = (DETAIL_ROW_H - DETAIL_BOX) // 2
+# A checklist item too long for one line ends in a small triangle; tapping
+# its text unfolds it to every line, each this much taller than the row.
+DETAIL_ITEM_LINE_H = 22
+DETAIL_ITEM_ARROW_W = 22      # right-edge column the triangle sits in
 
 # A star to toggle isFocusedToday from the panel itself, not just the phone.
 # Reserved as its own column at the right edge — a third tap zone per row,
@@ -75,8 +80,6 @@ FOCUS_STAR_SIZE = 20           # header-scale — smaller than a row's own star
 SORT_ARROW_SIZE = 20           # one button, shows whichever direction is on
 GROUP_TOGGLE_BOX = 28          # small icon boxes, heavier border when on
 GROUP_ICON_SIZE = 16           # the folder/layers icon drawn inside those
-SYNC_ICON_SIZE = 12            # deliberately smaller than the 20px controls —
-                               # "updated HH:MM" is status, not a 5th toggle
 
 # A group divider (area or project name) is half a task row — organizational
 # text, not a tappable item, so it doesn't need a task row's full height.
@@ -87,6 +90,53 @@ GROUP_HEADER_H = ROW_H // 2
 # full height for the OFFLINE warning, which is the one thing this app
 # promises never to make hard to notice.
 COLLAPSED_FOOTER_H = 10
+
+# Portrait is the same UI drawn on a 480x800 canvas that the display layer then
+# turns onto the panel's native 800x480 (see panel/rotation.py). Its header is
+# two rows — title/status on top, the seven controls spread across the full
+# width beneath — because the single landscape row is built for 800px.
+PORTRAIT_HEADER_H = 112
+PORTRAIT_HEADER_ROW_H = 56    # the title/status row; controls fill the rest
+
+# The screen lock (panel/lockscreen.py). Keys are well past the ~9 mm tap floor
+# (landscape 96x84 px is ~20x17 mm) because a passcode typed on a wall is
+# typed standing up, often in a hurry, and a missed digit costs a whole retry.
+LOCK_KEY_W, LOCK_KEY_H = 96, 84          # landscape keypad, 3 x 4 keys
+LOCK_KEY_W_PORTRAIT, LOCK_KEY_H_PORTRAIT = 124, 92
+LOCK_KEY_GAP = 10
+LOCK_DOT = 16                             # one per digit entered (or expected)
+# How long the keypad stays up with no input before folding back to the
+# clock and forgetting a half-typed code.
+LOCK_KEYPAD_TIMEOUT = 30
+# Wrong guesses allowed before a cooldown, and how long that cooldown is
+# (doubling with each further miss, capped). Four digits are 10,000 codes;
+# this makes standing at the wall guessing them a matter of days, not minutes.
+LOCK_FREE_TRIES = 5
+LOCK_COOLDOWN_SECONDS = 30
+LOCK_COOLDOWN_MAX = 15 * 60
+
+
+@dataclass(frozen=True)
+class Geometry:
+    """The canvas a render draws on. Everything that used to read WIDTH/HEIGHT/
+    HEADER_H/TEXT_RIGHT straight from this module reads it from here, so
+    landscape and portrait share one layout path."""
+    width: int
+    height: int
+    header_h: int
+    portrait: bool = False
+
+    @property
+    def text_right(self) -> int:
+        return self.width - MARGIN
+
+    @property
+    def list_text_right(self) -> int:
+        return self.text_right - STAR_ZONE_W
+
+
+LANDSCAPE = Geometry(WIDTH, HEIGHT, HEADER_H)
+PORTRAIT = Geometry(HEIGHT, WIDTH, PORTRAIT_HEADER_H, portrait=True)
 
 BLACK, WHITE = 0, 1           # mode "1" pixel values
 
@@ -133,6 +183,10 @@ class Fonts:
         self.header_right = _font(_REGULAR, 20)
         self.footer = _font(_REGULAR, 14)
         self.empty = _font(_REGULAR, 28)
+        self.clock = _font(_BOLD, 128)
+        self.clock_small = _font(_BOLD, 88)
+        self.lock_date = _font(_REGULAR, 26)
+        self.key = _font(_REGULAR, 36)
 
 
 _FONTS: Optional[Fonts] = None
