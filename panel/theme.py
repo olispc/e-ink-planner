@@ -36,8 +36,8 @@ TEXT_RIGHT = WIDTH - MARGIN
 # TEXT_X is the tap-zone boundary everywhere in the app, not just list-row
 # geometry: x < TEXT_X always means "the checkbox column" (complete a task,
 # toggle a checklist item, or — in the header — go back), x >= TEXT_X always
-# means "the text" (open a task's detail, or nothing further for a leaf
-# checklist item). One boundary, reused, keeps the tap model legible.
+# means "the text" (open a task's detail, or unfold a long checklist
+# item). One boundary, reused, keeps the tap model legible.
 
 # Checklist rows in the detail view get their own, smaller geometry: no
 # meta sub-line under each item, so more of them fit per screen than a task
@@ -45,6 +45,10 @@ TEXT_RIGHT = WIDTH - MARGIN
 DETAIL_ROW_H = 46
 DETAIL_BOX = 24
 DETAIL_BOX_Y_OFFSET = (DETAIL_ROW_H - DETAIL_BOX) // 2
+# A checklist item too long for one line ends in a small triangle; tapping
+# its text unfolds it to every line, each this much taller than the row.
+DETAIL_ITEM_LINE_H = 22
+DETAIL_ITEM_ARROW_W = 22      # right-edge column the triangle sits in
 
 # A star to toggle isFocusedToday from the panel itself, not just the phone.
 # Reserved as its own column at the right edge — a third tap zone per row,

@@ -60,6 +60,9 @@ class Panel:
         # "open" — see handle_tap — so reopening a task starts stacked again.
         self.checklist_expanded: bool = False
         self.checklist_page: int = 0
+        # Checklist items unfolded to their full wrapped title by a tap on
+        # their text. Same lifetime as checklist_expanded.
+        self.expanded_items: frozenset = frozenset()
         # Which page of the list view is showing — clamped, not reset, by
         # render() itself when the list shrinks, same as checklist_page.
         self.list_page: int = 0
@@ -166,7 +169,7 @@ class Panel:
             if task is None:
                 return ("detail-missing", self.detail_task_id)
             return (
-                "detail", task, self.checklist_expanded, self.checklist_page,
+                "detail", task, self.checklist_expanded, self.checklist_page, self.expanded_items,
                 tuple(sorted(self._shared_state().items())),
             )
         return (
@@ -192,7 +195,7 @@ class Panel:
             rendered = render_detail(
                 self._find(self.detail_task_id),
                 expanded=self.checklist_expanded, page=self.checklist_page,
-                **self._shared_state(),
+                expanded_items=self.expanded_items, **self._shared_state(),
             )
         else:
             rendered = render(
@@ -263,11 +266,16 @@ class Panel:
         elif box.kind == "open":
             self.mode, self.detail_task_id = "detail", box.task_id
             self.checklist_expanded, self.checklist_page = False, 0
+            self.expanded_items = frozenset()
             self.draw(force=True, partial=True)
         elif box.kind == "complete":
             self._complete_task(box.task_id)
         elif box.kind == "toggle":
             self._toggle_checklist_item(box.task_id, box.item_id)
+        elif box.kind == "expand_item":
+            self.expanded_items ^= {box.item_id}
+            self.checklist_page = box.page
+            self.draw(force=True, partial=True)
         elif box.kind == "expand":
             self.checklist_expanded, self.checklist_page = True, 0
             self.draw(force=True, partial=True)
@@ -476,7 +484,7 @@ class Panel:
             rendered = render_detail(
                 task, completing=True,
                 expanded=self.checklist_expanded, page=self.checklist_page,
-                **self._shared_state(),
+                expanded_items=self.expanded_items, **self._shared_state(),
             )
         else:
             rendered = render(

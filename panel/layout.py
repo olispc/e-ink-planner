@@ -17,7 +17,8 @@ from .client import Task
 from .rotation import is_portrait
 from .theme import (
     BLACK, BOX, BOX_X, COLLAPSED_FOOTER_H, DETAIL_BOX, DETAIL_BOX_Y_OFFSET,
-    DETAIL_DESC_LINE_H, DETAIL_DESC_MIN_LINES_WITH_CHECKLIST, DETAIL_ROW_H,
+    DETAIL_DESC_LINE_H, DETAIL_DESC_MIN_LINES_WITH_CHECKLIST, DETAIL_ITEM_ARROW_W,
+    DETAIL_ITEM_LINE_H, DETAIL_ROW_H,
     DETAIL_STAR_ZONE_W, FOCUS_STAR_SIZE, FOOTER_H,
     GROUP_HEADER_H, GROUP_ICON_SIZE, GROUP_TOGGLE_BOX, MARGIN, PAGER_BOX, PAGER_H, ROW_H, ROWS, SORT_ARROW_SIZE, STAR_SIZE,
     LANDSCAPE, PORTRAIT, PORTRAIT_HEADER_ROW_H, STAR_ZONE_W, TEXT_X, WHITE, Geometry, fonts,
@@ -45,7 +46,10 @@ class Hitbox:
     - "complete"  — mark task_id done (list view, x < TEXT_X)
     - "open"      — enter detail view for task_id (list view, x >= TEXT_X)
     - "back"      — return to list view (detail view header)
-    - "toggle"    — flip item_id's checked state on task_id (detail view)
+    - "toggle"    — flip item_id's checked state on task_id (detail view,
+                    checkbox column only)
+    - "expand_item" — show item_id's full wrapped title, or fold it back to
+                    one line; `page` is the checklist page it lands on after
     - "expand"    — un-stack the done-items summary row (detail view)
     - "collapse"  — re-stack done items back into the summary row
     - "page"      — jump to checklist page `page` (detail view, wraps around)
@@ -167,8 +171,14 @@ def _draw_disclosure(d: ImageDraw.ImageDraw, x0: int, y0: int, size: int, direct
     """Small triangle marking a row that stands in for several others
     rather than being an item of its own: right for "tap to reveal" (expand
     a stack) or "next page", left for "previous page", down for "tap to
-    hide" (collapse back)."""
-    if direction == "down":
+    hide" (collapse back). Up folds a wrapped checklist item back to one line."""
+    if direction == "up":
+        points = [
+            (x0 + size * 0.15, y0 + size * 0.70),
+            (x0 + size * 0.85, y0 + size * 0.70),
+            (x0 + size * 0.5, y0 + size * 0.20),
+        ]
+    elif direction == "down":
         points = [
             (x0 + size * 0.15, y0 + size * 0.30),
             (x0 + size * 0.85, y0 + size * 0.30),
@@ -187,6 +197,22 @@ def _draw_disclosure(d: ImageDraw.ImageDraw, x0: int, y0: int, size: int, direct
             (x0 + size * 0.78, y0 + size * 0.5),
         ]
     d.polygon(points, fill=BLACK)
+
+
+def _pack_pages(heights: Sequence[int], room: int) -> Tuple[List[int], int, bool]:
+    """Bin-pack checklist rows of varying height into pages, in order.
+    Returns each row's page, the page count, and whether a pager is needed.
+    With all rows the same height this is the old fixed rows-per-page split."""
+    needs_paging = sum(heights) > room
+    capacity = room - PAGER_H if needs_paging else room
+    page_of: List[int] = []
+    page, used = 0, 0
+    for h in heights:
+        if used and used + h > capacity:
+            page, used = page + 1, 0
+        page_of.append(page)
+        used += h
+    return page_of, (page + 1 if heights else 1), needs_paging
 
 
 def _draw_detail_pager(
@@ -966,7 +992,7 @@ def render_detail(
     now: Optional[datetime] = None, dark: bool = False, touch_locked: bool = False,
     sort_newest: bool = False, focus_sticky: bool = True, group_by_area: bool = False,
     group_by_project: bool = False, due_first: bool = False, portrait: bool = False,
-    rotation: int = 0,
+    rotation: int = 0, expanded_items: frozenset = frozenset(),
 ) -> Rendered:
     """One task, full title, and its checklist if it has one.
 
@@ -975,9 +1001,10 @@ def render_detail(
     a glance at the wall needs the open items, not eleven already-finished
     ones each taking a row. Expanding replaces that row with a "hide" row
     (tap to re-stack) followed by the done items individually, so a
-    specific one can be unticked. Checklist items get one full-width tap
-    zone each rather than the checkbox/text split list rows use — a leaf
-    item has only one action, so there is nothing for a text-tap to "open".
+    specific one can be unticked. Checklist items split at TEXT_X like list
+    rows: the checkbox column toggles, and the text — only when the item is
+    too long for one line, marked by a small triangle at its end — unfolds
+    it to its full wrapped title (`expanded_items`), or folds it back.
 
     Whatever doesn't fit `page`'s worth of rows is reachable by paging, not
     silently dropped — the last row on a page becomes a "page X/Y" control
@@ -1097,21 +1124,42 @@ def render_detail(
         else:
             entries.append(("stack", done))
 
-    max_rows = max(0, (fy - y) // DETAIL_ROW_H)
-    # A page whose entries don't fit reserves a thin pager strip (PAGER_H, the
-    # list view's) below its rows rather than a whole row's height, so paging
-    # costs less than one item.
-    needs_paging = len(entries) > max_rows
-    page_capacity = max(1, (fy - y - PAGER_H) // DETAIL_ROW_H) if needs_paging else max_rows
-    total_pages = max(1, -(-len(entries) // page_capacity)) if page_capacity else 1
-    page = max(0, min(page, total_pages - 1))
-    start = page * page_capacity
-    visible = entries[start:start + page_capacity]
-
+    # Each item is measured both ways up front: one line, or wrapped in full.
+    # Rows then pack into pages by height, so an unfolded item can push the
+    # rest onto the next page instead of off the bottom.
     item_text_x = BOX_X + DETAIL_BOX + 16
-    for i, (kind, payload) in enumerate(visible):
-        iy0 = y + i * DETAIL_ROW_H
-        iy1 = iy0 + DETAIL_ROW_H
+    full_w = g.text_right - item_text_x
+    wrap_w = full_w - DETAIL_ITEM_ARROW_W
+    # A single item never grows past one page, pager included.
+    max_lines = max(1, 1 + (fy - y - PAGER_H - DETAIL_ROW_H) // DETAIL_ITEM_LINE_H)
+    wrapped = {}
+    for kind, payload in entries:
+        if kind == "item" and _text_width(d, payload.title, f.meta) > full_w:
+            wrapped[payload.id] = _wrap(d, payload.title, f.meta, wrap_w, max_lines)
+
+    def heights(flip: Optional[str] = None) -> List[int]:
+        out = []
+        for kind, payload in entries:
+            open_ = kind == "item" and payload.id in wrapped and (
+                (payload.id in expanded_items) != (payload.id == flip)
+            )
+            n = len(wrapped[payload.id]) if open_ else 1
+            out.append(DETAIL_ROW_H + (n - 1) * DETAIL_ITEM_LINE_H)
+        return out
+
+    row_h = heights()
+    page_of, total_pages, needs_paging = _pack_pages(row_h, fy - y)
+    page = max(0, min(page, total_pages - 1))
+
+    iy0 = y
+    drawn = 0
+    for i, (kind, payload) in enumerate(entries):
+        if page_of[i] != page:
+            continue
+        if drawn:
+            d.line([(item_text_x, iy0), (g.text_right, iy0)], fill=BLACK, width=1)
+        drawn += 1
+        iy1 = iy0 + row_h[i]
         box_y2 = iy0 + DETAIL_BOX_Y_OFFSET
         text_y = iy0 + (DETAIL_ROW_H - 20) // 2
 
@@ -1132,25 +1180,43 @@ def render_detail(
         else:
             item = payload
             hitboxes.append(
-                Hitbox("toggle", 0, g.width, iy0, iy1, task_id=task.id, item_id=item.id)
+                Hitbox("toggle", 0, TEXT_X, iy0, iy1, task_id=task.id, item_id=item.id)
             )
             d.rectangle(
                 [BOX_X, box_y2, BOX_X + DETAIL_BOX, box_y2 + DETAIL_BOX], outline=BLACK, width=2
             )
-            text = _ellipsize(d, item.title, f.meta, g.text_right - item_text_x)
-            d.text((item_text_x, text_y), text, font=f.meta, fill=BLACK)
+            if item.id in wrapped:
+                is_open = item.id in expanded_items
+                lines = wrapped[item.id] if is_open else [_ellipsize(d, item.title, f.meta, wrap_w)]
+                # Where the item will be once flipped, so the panel can turn
+                # to that page rather than lose it off the bottom of this one.
+                flipped_page = _pack_pages(heights(flip=item.id), fy - y)[0][i]
+                hitboxes.append(Hitbox(
+                    "expand_item", TEXT_X, g.width, iy0, iy1,
+                    task_id=task.id, item_id=item.id, page=flipped_page,
+                ))
+                arrow = DETAIL_ITEM_ARROW_W - 8
+                _draw_disclosure(
+                    d, g.text_right - arrow, text_y + (20 - arrow) // 2 + 1, arrow,
+                    direction="up" if is_open else "down",
+                )
+            else:
+                lines = [item.title]
+            for n, line in enumerate(lines):
+                ly = text_y + n * DETAIL_ITEM_LINE_H
+                d.text((item_text_x, ly), line, font=f.meta, fill=BLACK)
+                if item.completed:
+                    # Strikethrough, centered on the actual glyph bounds
+                    # (see _strike_line), on every wrapped line.
+                    _strike_line(d, item_text_x, ly, line, f.meta)
             if item.completed:
                 # Tick, not a fill — a fill is reserved for "tap here to
-                # complete", and this item already is. Strikethrough too,
-                # centered on the actual glyph bounds (see _strike_line).
+                # complete", and this item already is.
                 _draw_check(d, BOX_X, box_y2, DETAIL_BOX)
-                _strike_line(d, item_text_x, text_y, text, f.meta)
-        if i < len(visible) - 1 or needs_paging:
-            d.line([(item_text_x, iy1), (g.text_right, iy1)], fill=BLACK, width=1)
+        iy0 = iy1
 
     if needs_paging:
-        pi = len(visible)
-        iy0 = y + pi * DETAIL_ROW_H
+        d.line([(item_text_x, iy0), (g.text_right, iy0)], fill=BLACK, width=1)
         hitboxes.extend(_draw_detail_pager(d, g, iy0, iy0 + PAGER_H, page, total_pages, task.id))
 
     # --- footer: a bare rule (progress is on the meta line) -----------------

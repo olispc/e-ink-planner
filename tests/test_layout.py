@@ -571,13 +571,47 @@ class TestDetailRendering(unittest.TestCase):
         box = hit(rendered.hitboxes, (TEXT_RIGHT - 10, HEADER_H + 20))
         self.assertEqual((box.kind, box.task_id), ("star", "task-1"))
 
-    def test_checklist_item_toggle_is_full_width(self):
-        # A leaf item has one action, so unlike a task row its whole width
-        # (not just a checkbox column) should be tappable.
+    def test_checklist_item_toggle_is_only_the_checkbox_column(self):
+        # Same TEXT_X split as list rows: the text is left free for unfolding
+        # a long item, so a tap there must never tick it by accident.
         checklist = [item(0)]
         rendered = render_detail(task(1, checklist=checklist))
         toggle = next(b for b in rendered.hitboxes if b.kind == "toggle")
-        self.assertEqual((toggle.x0, toggle.x1), (0, WIDTH))
+        self.assertEqual((toggle.x0, toggle.x1), (0, TEXT_X))
+
+    def test_short_item_text_has_no_expand_zone(self):
+        rendered = render_detail(task(1, checklist=[item(0)]))
+        self.assertFalse([b for b in rendered.hitboxes if b.kind == "expand_item"])
+
+    def test_long_item_unfolds_to_a_taller_row(self):
+        long_title = " ".join(["word%d" % n for n in range(40)])
+        checklist = [item(0, title=long_title), item(1)]
+        folded = render_detail(task(1, checklist=checklist))
+        box = next(b for b in folded.hitboxes if b.kind == "expand_item")
+        self.assertEqual((box.item_id, box.x0, box.page), ("item-0", TEXT_X, 0))
+        unfolded = render_detail(task(1, checklist=checklist), expanded_items=frozenset({"item-0"}))
+        def row_h(r):
+            return next(b for b in r.hitboxes if b.kind == "toggle" and b.item_id == "item-0")
+        self.assertGreater(row_h(unfolded).y1 - row_h(unfolded).y0, row_h(folded).y1 - row_h(folded).y0)
+        # The next item moves down by exactly the extra height.
+        def y_of(r, item_id):
+            return next(b.y0 for b in r.hitboxes if b.kind == "toggle" and b.item_id == item_id)
+        self.assertGreater(y_of(unfolded, "item-1"), y_of(folded, "item-1"))
+
+    def test_unfolding_an_item_pushed_off_the_page_points_at_its_new_page(self):
+        long_title = " ".join(["word%d" % n for n in range(40)])
+        # Five short items then a long one: six fit one page folded, but the
+        # long one unfolded no longer fits under the other five.
+        checklist = [item(n) for n in range(5)] + [item(5, title=long_title)]
+        folded = render_detail(task(1, checklist=checklist))
+        self.assertFalse([b for b in folded.hitboxes if b.kind == "page"])
+        box = next(b for b in folded.hitboxes if b.kind == "expand_item")
+        self.assertEqual(box.page, 1)
+        unfolded = render_detail(
+            task(1, checklist=checklist), expanded_items=frozenset({"item-5"}), page=box.page,
+        )
+        self.assertTrue(any(b.kind == "toggle" and b.item_id == "item-5" for b in unfolded.hitboxes))
+        self.assertTrue([b for b in unfolded.hitboxes if b.kind == "page"])
 
     def test_completing_flash_changes_the_image(self):
         plain = render_detail(task(1)).image

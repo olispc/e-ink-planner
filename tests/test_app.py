@@ -173,6 +173,25 @@ class TestDetailRedrawGating(unittest.TestCase):
         self.assertEqual(panel.mode, "list")
 
 
+class TestChecklistItemUnfold(unittest.TestCase):
+    def test_text_tap_unfolds_and_refolds_without_ticking(self):
+        from panel.client import ChecklistItem
+        long_title = " ".join(["word%d" % n for n in range(40)])
+        checklist = (ChecklistItem(id="i0", title=long_title, completed=False),)
+        panel = make_panel([task(1, checklist=checklist)])
+        panel.refresh()
+        panel.mode, panel.detail_task_id = "detail", "task-1"
+        panel.draw(force=True)
+        box = next(b for b in panel.hitboxes if b.kind == "expand_item")
+        panel.handle_tap((box.x0 + 5, box.y0 + 5))
+        self.assertEqual(panel.expanded_items, frozenset({"i0"}))
+        self.assertFalse(panel._find("task-1").checklist[0].completed)
+        self.assertEqual(len(panel.display.shown), 2)
+        box = next(b for b in panel.hitboxes if b.kind == "expand_item")
+        panel.handle_tap((box.x0 + 5, box.y0 + 5))
+        self.assertEqual(panel.expanded_items, frozenset())
+
+
 class TestStarToggle(unittest.TestCase):
     def test_toggle_star_flips_focused_optimistically(self):
         panel = make_panel([task(1, focused=False)])

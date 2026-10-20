@@ -65,12 +65,17 @@ task, so a filled box reads as done. Focused rows get a heavier border instead.
 **One tap-zone boundary, reused everywhere.** `theme.TEXT_X` splits every row
 in the app: x < TEXT_X is always the checkbox column (complete a task, toggle
 a checklist item, or — in the header — go back), x >= TEXT_X is always the
-text (open a task's detail view, or nothing further for a leaf checklist
-item, which has no next level to open). Tapping a task's title opens
+text (open a task's detail view, or unfold a checklist item too long for
+one line). Tapping a task's title opens
 `render_detail()` — full title, meta, the full description (not a snippet —
 see below), and its checklist if it has one, unchecked items sorted to the
-top. Checklist items get a full-width tap zone (not split) since a leaf
-item has only one action.
+top. Checklist items split at `TEXT_X` too: only the checkbox column ticks,
+so the text is free for unfolding. An item that doesn't fit one line ends
+in a small ▼; tapping its text wraps it in full (▲ folds it back), the row
+growing by `DETAIL_ITEM_LINE_H` per line. `Panel.expanded_items` holds which
+are open and resets on "open". Rows therefore pack into pages by height
+(`_pack_pages()`), and the `expand_item` hitbox carries the page the item
+lands on once flipped, so unfolding never pushes it off the page you're on.
 A task row (list or detail title) adds a third, physically separate column
 at the far right — `theme.STAR_ZONE_W` — for starring: a third gesture on
 top of the existing two would need tap-vs-long-press disambiguation, exactly
