@@ -29,7 +29,7 @@ VIEW_TITLES = {
     "inbox": "INBOX",
     "waiting": "WAITING ON",
     "someday": "SOMEDAY",
-    "focus": "TODAY",
+    "focus": "mindwtr",
 }
 
 EMPTY_MESSAGES = {
