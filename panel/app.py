@@ -237,8 +237,18 @@ class Panel:
         """Page-turn like a Kindle: dragging left reveals the next page,
         dragging right the previous. The current screen's own pager hitboxes
         already say which page that is (and wrap at the ends), so this just
-        borrows them — a screen with no pager has nothing to turn."""
-        pagers = [b for b in getattr(self, "hitboxes", []) if b.kind in ("list_page", "page")]
+        borrows them — a screen with no pager has nothing to turn.
+
+        On a task's detail view, dragging right from its first page (or a
+        detail with no pager) is "back" instead: it borrows the header's back
+        box the same way, so it is gated exactly like tapping it."""
+        boxes = getattr(self, "hitboxes", [])
+        if self.mode == "detail" and dx > 0 and self.checklist_page == 0:
+            back = next((b for b in boxes if b.kind == "back"), None)
+            if back is not None:
+                self.handle_tap((back.x0 + 1, back.y0 + 1))
+            return
+        pagers = [b for b in boxes if b.kind in ("list_page", "page")]
         if not pagers:
             return
         box = max(pagers, key=lambda b: b.x0) if dx < 0 else min(pagers, key=lambda b: b.x0)

@@ -102,7 +102,10 @@ a screen with no pager ignores it. `touch.classify()` decides tap vs swipe
 from the stroke's start and end: under `TAP_SLOP` is a tap (at the landing
 point), over `SWIPE_MIN_DX` and mostly sideways is a swipe, anything else is
 dropped — so a vertical drag no longer fires a tap where the finger lifted.
-Page turns are partial refreshes like every other update.
+Page turns are partial refreshes like every other update. On a task's
+detail view a right swipe from its first page (or with no pager) is "back"
+instead of wrapping to the last page — it borrows the header's `back` box
+the same way, so the touch lock gates it like the tap.
 
 **The detail view's description gets real space, not one truncated line —
 but never at the checklist's expense.** `_wrap_paragraphs()` wraps the whole

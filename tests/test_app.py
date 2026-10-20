@@ -264,6 +264,34 @@ class TestSwipePaging(unittest.TestCase):
         panel.handle_gesture(Gesture("swipe", 600, 200, dx=-300))
         self.assertEqual(panel.list_page, 0)
 
+    def _detail(self, n_items):
+        from panel.client import ChecklistItem
+        checklist = tuple(ChecklistItem(id="i%d" % i, title="Item %d" % i, completed=False) for i in range(n_items))
+        panel = make_panel([task(1, checklist=checklist)])
+        panel.refresh()
+        panel.mode, panel.detail_task_id = "detail", "task-1"
+        panel.draw(force=True)
+        return panel
+
+    def test_swipe_right_on_detail_goes_back(self):
+        panel = self._detail(2)
+        panel.handle_gesture(Gesture("swipe", 200, 200, dx=300))
+        self.assertEqual((panel.mode, panel.detail_task_id), ("list", None))
+
+    def test_swipe_right_on_a_later_detail_page_turns_back_a_page_first(self):
+        panel = self._detail(20)
+        panel.handle_gesture(Gesture("swipe", 600, 200, dx=-300))
+        self.assertEqual(panel.checklist_page, 1)
+        panel.handle_gesture(Gesture("swipe", 200, 200, dx=300))
+        self.assertEqual((panel.mode, panel.checklist_page), ("detail", 0))
+        panel.handle_gesture(Gesture("swipe", 200, 200, dx=300))
+        self.assertEqual(panel.mode, "list")
+
+    def test_swipe_left_on_detail_without_a_pager_stays(self):
+        panel = self._detail(2)
+        panel.handle_gesture(Gesture("swipe", 600, 200, dx=-300))
+        self.assertEqual(panel.mode, "detail")
+
 
 class TestClassify(unittest.TestCase):
     def test_small_movement_is_a_tap_at_the_landing_point(self):
