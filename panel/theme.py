@@ -60,7 +60,7 @@ STAR_ZONE_W = 60
 LIST_TEXT_RIGHT = TEXT_RIGHT - STAR_ZONE_W  # title/meta ellipsis width in render()
 
 # Detail view reserves the same kind of column in its title block instead —
-# the title can wrap to 2 lines, so this trims _wrap()'s width rather than
+# the title can wrap to several lines, so this trims _wrap()'s width rather than
 # competing for a fixed corner.
 DETAIL_STAR_ZONE_W = 56
 
@@ -125,6 +125,9 @@ class Geometry:
     height: int
     header_h: int
     portrait: bool = False
+    # How far the detail view's title may wrap before it ellipsizes. Portrait
+    # has height to spare and ~17 characters a line; landscape has neither.
+    detail_title_lines: int = 2
 
     @property
     def text_right(self) -> int:
@@ -136,7 +139,7 @@ class Geometry:
 
 
 LANDSCAPE = Geometry(WIDTH, HEIGHT, HEADER_H)
-PORTRAIT = Geometry(HEIGHT, WIDTH, PORTRAIT_HEADER_H, portrait=True)
+PORTRAIT = Geometry(HEIGHT, WIDTH, PORTRAIT_HEADER_H, portrait=True, detail_title_lines=5)
 
 BLACK, WHITE = 0, 1           # mode "1" pixel values
 

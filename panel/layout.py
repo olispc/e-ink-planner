@@ -1037,7 +1037,8 @@ def render_detail(
         Hitbox("star", g.text_right - DETAIL_STAR_ZONE_W, g.text_right, y, y + BOX, task_id=task.id)
     )
     title_lines = _wrap(
-        d, task.title, f.title, g.text_right - TEXT_X - DETAIL_STAR_ZONE_W, max_lines=2
+        d, task.title, f.title, g.text_right - TEXT_X - DETAIL_STAR_ZONE_W,
+        max_lines=g.detail_title_lines,
     )
     line_y = y
     drawn_lines = []

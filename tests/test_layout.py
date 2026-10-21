@@ -571,6 +571,16 @@ class TestDetailRendering(unittest.TestCase):
         box = hit(rendered.hitboxes, (TEXT_RIGHT - 10, HEADER_H + 20))
         self.assertEqual((box.kind, box.task_id), ("star", "task-1"))
 
+    def test_portrait_detail_title_wraps_further_than_landscape(self):
+        # A long title on the tall canvas gets more lines before the "…";
+        # landscape keeps its two, so its checklist keeps its rows.
+        long_title = " ".join(["word%d" % n for n in range(30)])
+        def complete_box_h(**kw):
+            r = render_detail(task(1, title=long_title), **kw)
+            box = next(b for b in r.hitboxes if b.kind == "complete")
+            return box.y1 - box.y0
+        self.assertGreater(complete_box_h(portrait=True), complete_box_h() + 60)
+
     def test_checklist_item_toggle_is_only_the_checkbox_column(self):
         # Same TEXT_X split as list rows: the text is left free for unfolding
         # a long item, so a tap there must never tick it by accident.
