@@ -1021,11 +1021,22 @@ class TestProcessingView(unittest.TestCase):
                        ("contexts", task(1)), ("due", task(1))):
             for cy in (30, 31):
                 img = Image.new("1", (60, 60), WHITE)
-                _draw_field_icon(ImageDraw.Draw(img), key, t, 20, cy)
+                _draw_field_icon(ImageDraw.Draw(img), key, t, 28, cy)
                 x0, y0, x1, y1 = Image.eval(img.convert("L"), lambda v: 255 - v).getbbox()
                 cx, mid = (x0 + x1 - 1) / 2, (y0 + y1 - 1) / 2
                 self.assertEqual(cx, 28, (key, t.area))
                 self.assertLessEqual(abs(mid - cy), 0.5, (key, t.area, mid))
+
+    def test_the_field_icons_centre_under_the_title_checkbox(self):
+        r = render_detail(task(1, project="P", contexts=["@a"], due_date=datetime(2026, 10, 24)))
+        px = r.image.load()
+        info = self.kinds(r, "pick")[0]
+        complete = self.kinds(r, "complete")[0]
+        def ink_cols(y0, y1):
+            return [x for x in range(0, TEXT_X) if any(px[x, y] == BLACK for y in range(y0, y1))]
+        box = ink_cols(complete.y0, complete.y1 - 2)      # above the title's rule
+        icons = ink_cols(info.y0 + 2, info.y1 - 6)
+        self.assertEqual((box[0] + box[-1]) / 2, (icons[0] + icons[-1]) / 2)
 
     def test_unset_fields_take_no_room_but_edit_stays_reachable(self):
         full = task(1, project="P", contexts=["@a"], created_at=datetime(2026, 9, 1),

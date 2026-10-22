@@ -1180,15 +1180,21 @@ def _glyph_ink_centre(text: str, font) -> Tuple[float, float]:
     return _INK_CENTRES[key]
 
 
-def _draw_field_icon(d: ImageDraw.ImageDraw, key: str, task: Task, x: float, cy: float) -> None:
-    """A field row's icon, centred on (x + GROUP_ICON_SIZE / 2, cy): a folder
-    for a project (layers when filed under an area alone), @ for contexts, a
-    calendar for the due date. The @ is a glyph, so it is placed by its
+# Field icons sit centred under the title's checkbox — the column's centre,
+# not its left edge, since the checkbox is twice an icon's width.
+FIELD_ICON_CX = BOX_X + BOX // 2
+
+
+def _draw_field_icon(d: ImageDraw.ImageDraw, key: str, task: Task, cx: int, cy: float) -> None:
+    """A field row's icon, its ink centred on pixel (cx, cy): a folder for a
+    project (layers when filed under an area alone), @ for contexts, a
+    calendar for the due date. The drawn icons are GROUP_ICON_SIZE + 1
+    pixels wide, so an odd width with an exact centre pixel. The @ is a glyph, so it is placed by its
     measured ink box rather than its drawing origin, whose offset depends on
     the font's side bearings and ascent — that left it 1.5px right and low
     of the drawn icons."""
     f = fonts()
-    top = cy - GROUP_ICON_SIZE / 2
+    x, top = cx - GROUP_ICON_SIZE // 2, cy - GROUP_ICON_SIZE / 2
     if key == "where" and task.area and not task.project:
         _draw_layers_icon(d, x, top, GROUP_ICON_SIZE)
     elif key == "where":
@@ -1197,7 +1203,7 @@ def _draw_field_icon(d: ImageDraw.ImageDraw, key: str, task: Task, x: float, cy:
         _draw_calendar_icon(d, x, top, GROUP_ICON_SIZE)
     else:
         ox, oy = _glyph_ink_centre("@", f.context_icon)
-        d.text((round(x + GROUP_ICON_SIZE / 2 - ox), round(cy - oy)), "@",
+        d.text((round(cx - ox), round(cy - oy)), "@",
                font=f.context_icon, fill=BLACK)
 
 
@@ -1219,7 +1225,7 @@ def _draw_processing(d: ImageDraw.ImageDraw, g: Geometry, task: Task, y: int, no
         y0, y1 = y, y + DETAIL_ROW_H
         if i:
             d.line([(TEXT_X, y0), (g.text_right, y0)], fill=BLACK, width=1)
-        _draw_field_icon(d, key, task, BOX_X + 4, y0 + DETAIL_ROW_H // 2)
+        _draw_field_icon(d, key, task, FIELD_ICON_CX, y0 + DETAIL_ROW_H // 2)
         d.text((TEXT_X, y0 + (DETAIL_ROW_H - 22) // 2),
                _ellipsize(d, value or FIELD_PLACEHOLDERS[key], f.meta, g.text_right - TEXT_X - DETAIL_ITEM_ARROW_W),
                font=f.meta, fill=BLACK)
@@ -1365,7 +1371,7 @@ def render_detail(
                 text_right -= 16
             if i < len(fields):
                 key, value = fields[i]
-                _draw_field_icon(d, key, task, BOX_X + 4, y + DETAIL_INFO_LINE_H // 2)
+                _draw_field_icon(d, key, task, FIELD_ICON_CX, y + DETAIL_INFO_LINE_H // 2)
                 d.text((TEXT_X, y + (DETAIL_INFO_LINE_H - 22) // 2),
                        _ellipsize(d, value, f.meta, text_right - TEXT_X), font=f.meta, fill=BLACK)
             y += DETAIL_INFO_LINE_H

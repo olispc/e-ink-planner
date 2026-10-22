@@ -332,7 +332,8 @@ column runs the title's full height.
 **Any task can be edited from its detail view.** Outside the inbox, under the
 title's rule sits the Edit screen's rows in miniature (`DETAIL_INFO_LINE_H`,
 about half a row): where it's filed, its contexts, its due date, each behind the
-same icon in the left column with its text in line with the title
+same icon centred under the title's checkbox (`FIELD_ICON_CX`) with its text
+in line with the title
 (`_field_rows()` / `_draw_field_icon()`, shared with the processing rows) —
 but only the ones that are set. No placeholders on the detail view, and an unset
 field costs no height, which matters most in landscape where every pixel is a
