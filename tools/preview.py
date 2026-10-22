@@ -8,6 +8,7 @@ live mindwtr-cloud if you point it at one.
     python3 tools/preview.py --live --view focus
     python3 tools/preview.py --scale 1     # actual panel pixels
     python3 tools/preview.py --lock keypad --lock-image some.jpg
+    python3 tools/preview.py --view inbox --open 1 --picker due
 """
 from __future__ import annotations
 
@@ -19,23 +20,34 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from panel.client import ChecklistItem, MindwtrClient, Task, _parse_iso  # noqa: E402
+from panel.client import (  # noqa: E402
+    Area, ChecklistItem, MindwtrClient, Project, Store, Task, _parse_iso, rejoin,
+)
 from panel.config import Config  # noqa: E402
-from panel.layout import render  # noqa: E402
+from panel.layout import listed_order, render, render_detail, select_view  # noqa: E402
+from panel.pickers import render_picker  # noqa: E402
 from panel.lockscreen import load_background, pick_background, render_lock  # noqa: E402
 from panel.rotation import is_portrait  # noqa: E402
 
 FIXTURE = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "tasks.json"
 
 
-def from_fixture(path: Path):
-    raw = json.loads(path.read_text())
-    return [
-        Task(
+def from_fixture(path: Path) -> Store:
+    """The fixture names projects and areas rather than referencing them, so
+    each name doubles as its id; a task's project brings its area, as in
+    Mindwtr. Status defaults to next."""
+    raw = json.loads(path.read_text())["tasks"]
+    areas = {t["area"]: Area(id=t["area"], name=t["area"]) for t in raw if t.get("area")}
+    projects = {
+        t["project"]: Project(id=t["project"], title=t["project"], area_id=t.get("area"))
+        for t in raw if t.get("project")
+    }
+    tasks = [
+        rejoin(Task(
             id=t["id"],
             title=t["title"],
-            project=t.get("project"),
-            area=t.get("area"),
+            project=None,
+            area=None,
             contexts=t.get("contexts", []),
             focused=t.get("focused", False),
             created_at=_parse_iso(t.get("createdAt")),
@@ -45,9 +57,13 @@ def from_fixture(path: Path):
                 ChecklistItem(id=c["id"], title=c["title"], completed=c.get("completed", False))
                 for c in t.get("checklist", [])
             ],
-        )
-        for t in raw["tasks"]
+            status=t.get("status", "next"),
+            project_id=t.get("project"),
+            area_id=None if t.get("project") else t.get("area"),
+        ), list(projects.values()), list(areas.values()))
+        for t in raw
     ]
+    return Store(tasks=tasks, areas=list(areas.values()), projects=list(projects.values()))
 
 
 def main() -> int:
@@ -65,6 +81,10 @@ def main() -> int:
     ap.add_argument("--portrait", action="store_true",
                     help="480x800 portrait (also on when PANEL_ROTATION is 90 or 270, the default)")
     ap.add_argument("--landscape", action="store_true", help="800x480, whatever PANEL_ROTATION says")
+    ap.add_argument("--open", type=int, metavar="N",
+                    help="the detail view of the view's Nth task (1 = top of the list)")
+    ap.add_argument("--picker", choices=["edit", "where", "contexts", "due"],
+                    help="with --open: that task's picker")
     ap.add_argument("--scale", type=int, default=1, help="upscale for screen viewing")
     args = ap.parse_args()
 
@@ -72,9 +92,11 @@ def main() -> int:
     view = args.view or config.view
 
     if args.live:
-        tasks = MindwtrClient(config.url, config.token).fetch(view, 50)
+        store = MindwtrClient(config.url, config.token).fetch(1000)
     else:
-        tasks = from_fixture(args.fixture)
+        store = from_fixture(args.fixture)
+    tasks = select_view(store.tasks, view)
+    inbox_count = sum(1 for t in store.tasks if t.status == "inbox")
 
     portrait = args.portrait or (is_portrait(config.rotation) and not args.landscape)
     if args.lock:
@@ -85,10 +107,21 @@ def main() -> int:
             code_length=len(config.passcode) or 4, dark=args.dark,
             background=load_background(source, size),
         ).image
+    elif args.open:
+        task = listed_order(tasks, False, True, False, False, False)[args.open - 1]
+        common = dict(dark=args.dark, touch_locked=args.touch_locked, portrait=portrait,
+                      rotation=270 if portrait else 0, view=view, inbox_count=inbox_count)
+        if args.picker:
+            image = render_picker(
+                args.picker, task, projects=store.projects, areas=store.areas,
+                contexts=sorted({c for t in store.tasks for c in t.contexts}), **common,
+            ).image
+        else:
+            image = render_detail(task, **common).image
     else:
         image = render(
             tasks, view, total=len(tasks), dark=args.dark, touch_locked=args.touch_locked,
-            portrait=portrait, rotation=270 if portrait else 0,
+            portrait=portrait, rotation=270 if portrait else 0, inbox_count=inbox_count,
         ).image
     if args.scale > 1:
         image = image.convert("L").resize(

@@ -67,6 +67,18 @@ in is the difference between a planner and a random sample.
 Nothing starred is not a failure state — the panel is then simply next actions,
 so the focus flag earns its place without being load-bearing.
 
+The header's first four icons are view tabs, in Mindwtr's own sidebar order and
+with its icons: Focus, Inbox (with a count), Waiting and Someday. `PANEL_VIEW`
+picks the one it starts on. The panel fetches every open task in one request and
+splits it locally, so switching tab never waits on the network.
+
+**Processing the inbox.** Tapping an inbox task opens it with three rows (project
+or area, contexts, due date), each of which opens a picker of what Mindwtr
+already has, and a Next / Waiting / Someday row to send it on. The panel does not
+create areas, projects or contexts: it is a bad place to type. Each choice is
+written as soon as it is made. Sending a task on, or ticking it done, moves
+straight to the next inbox task, so the inbox can be worked top to bottom.
+
 ## Using a different display
 
 Not tested on anything but the panel above, but the code is split so it should

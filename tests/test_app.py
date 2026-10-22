@@ -8,13 +8,14 @@ import sys
 import tempfile
 import unittest
 from dataclasses import replace
+from datetime import date, datetime
 from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from panel.app import Panel  # noqa: E402
-from panel.client import Task  # noqa: E402
+from panel.client import Area, Project, Store, Task, apply_fields  # noqa: E402
 from panel.config import Config  # noqa: E402
 from panel.touch import Gesture, classify  # noqa: E402
 
@@ -31,26 +32,27 @@ def task(n: int, **kw) -> Task:
 class StubClient:
     """No network, but persists writes like a real store — a test can still
     reassign `.tasks` directly to simulate "changed on another device", but
-    a mutation method now behaves the way the real server would, which
-    matters once a Panel method's own internal refresh() reads it back."""
+    a write behaves the way the real server would (through the same
+    apply_fields the panel uses), which matters once a Panel method's own
+    internal refresh() reads it back."""
 
-    def __init__(self, tasks):
+    def __init__(self, tasks, areas=(), projects=()):
         self.tasks = list(tasks)
+        self.areas = list(areas)
+        self.projects = list(projects)
+        self.writes = []
 
-    def fetch(self, view, limit):
-        return list(self.tasks)
+    def fetch(self, limit):
+        return Store(tasks=list(self.tasks), areas=self.areas, projects=self.projects)
 
     def complete(self, task_id):
         self.tasks = [t for t in self.tasks if t.id != task_id]
 
-    def update_checklist(self, task_id, checklist):
+    def update_task(self, task_id, fields):
+        self.writes.append((task_id, fields))
         self.tasks = [
-            replace(t, checklist=checklist) if t.id == task_id else t for t in self.tasks
-        ]
-
-    def set_focused(self, task_id, focused):
-        self.tasks = [
-            replace(t, focused=focused) if t.id == task_id else t for t in self.tasks
+            apply_fields(t, fields, self.projects, self.areas) if t.id == task_id else t
+            for t in self.tasks
         ]
 
     def data_etag(self):
@@ -71,9 +73,12 @@ class StubDisplay:
         pass
 
 
-def make_panel(tasks, rotation: int = 0, state_path=None, **config_kw) -> Panel:
+def make_panel(tasks, rotation: int = 0, state_path=None, view="focus", sort_newest=False,
+               **config_kw) -> Panel:
+    # Oldest-first, which these tests were written against; the real default
+    # (newest-first, or whatever was saved) is Config's and tested there.
     config = Config(
-        url="http://stub", token="t", view="next", poll_seconds=300,
+        url="http://stub", token="t", view=view, poll_seconds=300, sort_newest=sort_newest,
         check_seconds=5, display="png", touch="none",
         png_path=Path("/tmp/unused-panel-test.png"), touch_device="",
         rotation=rotation, state_path=state_path, **config_kw,
@@ -203,7 +208,7 @@ class TestStarToggle(unittest.TestCase):
 
     def test_toggle_star_reverts_on_failure(self):
         class FailingClient(StubClient):
-            def set_focused(self, task_id, focused):
+            def update_task(self, task_id, fields):
                 from panel.client import MindwtrError
 
                 raise MindwtrError("boom")
@@ -854,6 +859,260 @@ class TestScreenLock(unittest.TestCase):
         self._tap(panel, "toggle_touch_lock")
         self._tap(panel, "lock_screen")
         self.assertFalse(panel.screen_locked)
+
+
+def inbox(n, **kw):
+    return task(n, status="inbox", created_at=datetime(2026, 10, n), **kw)
+
+
+class TestViewTabs(unittest.TestCase):
+    def _tap(self, panel, kind, key=None):
+        box = next(b for b in panel.hitboxes if b.kind == kind and (key is None or b.key == key))
+        panel.handle_tap(((box.x0 + box.x1) // 2, (box.y0 + box.y1) // 2))
+
+    def _panel(self):
+        tasks = [task(i) for i in range(10)] + [inbox(1), inbox(2), task(20, status="waiting")]
+        panel = make_panel(tasks)
+        panel.refresh()
+        panel.draw(force=True)
+        return panel
+
+    def test_a_tab_shows_its_status_and_starts_on_page_one(self):
+        panel = self._panel()
+        panel.list_page = 1
+        self._tap(panel, "view", "inbox")
+        self.assertEqual(panel.view, "inbox")
+        self.assertEqual(panel.list_page, 0)
+        opened = {b.task_id for b in panel.hitboxes if b.kind == "open"}
+        self.assertEqual(opened, {"task-1", "task-2"})
+
+    def test_the_active_tab_is_home(self):
+        panel = self._panel()
+        self._tap(panel, "view", "waiting")
+        self.assertEqual({b.key for b in panel.hitboxes if b.kind == "home"}, {"waiting"})
+
+    def test_from_a_task_another_tab_leaves_it_for_that_list(self):
+        panel = self._panel()
+        self._tap(panel, "open")
+        self._tap(panel, "view", "inbox")
+        self.assertEqual((panel.mode, panel.view), ("list", "inbox"))
+
+    def test_switching_tab_needs_no_fetch(self):
+        panel = self._panel()
+        panel.client = None   # any network use would now raise
+        self._tap(panel, "view", "someday")
+        self.assertEqual(panel.view, "someday")
+
+    def test_an_unknown_configured_view_starts_on_focus(self):
+        with mock.patch("sys.stderr"):
+            panel = make_panel([task(1)], view="next")
+        self.assertEqual(panel.view, "focus")
+
+
+def tap(panel, kind, key=None):
+    """Tap the middle of the first box of `kind` (and `key`, if given)."""
+    box = next(b for b in panel.hitboxes if b.kind == kind and (key is None or b.key == key))
+    panel.handle_tap(((box.x0 + box.x1) // 2, (box.y0 + box.y1) // 2))
+
+
+class TestFilingAnyTask(unittest.TestCase):
+    """Any task's detail view can change its project or area, not only an
+    inbox task being processed."""
+
+    def _editing(self):
+        panel = make_panel([])
+        panel.client = StubClient([task(1, contexts=["@home"]), task(2)],
+                                  [Area("a1", "Digital")], [Project("p1", "sowr", "a1")])
+        panel.refresh()
+        panel.draw(force=True)
+        tap(panel, "open")
+        tap(panel, "pick", "edit")
+        self.assertEqual((panel.mode, panel.picker), ("picker", "edit"))
+        return panel
+
+    def test_a_choice_returns_to_the_edit_screen_and_back_returns_to_the_task(self):
+        panel = self._editing()
+        task_id = panel.detail_task_id
+        tap(panel, "pick", "where")
+        tap(panel, "choose_where", "project:p1")
+        self.assertEqual(panel.client.writes, [(task_id, {"projectId": "p1", "areaId": None})])
+        self.assertEqual((panel.mode, panel.picker), ("picker", "edit"))
+        self.assertEqual(panel._find(task_id).project, "sowr")
+        self.assertEqual(panel._find(task_id).status, "next")     # filing doesn't move it
+        tap(panel, "back")
+        self.assertEqual((panel.mode, panel.detail_task_id), ("detail", task_id))
+
+    def test_contexts_and_due_date_from_edit(self):
+        panel = self._editing()
+        tap(panel, "pick", "contexts")
+        tap(panel, "toggle_context", "@home")
+        tap(panel, "back")                                         # contexts stays open
+        self.assertEqual(panel.picker, "edit")
+        tap(panel, "pick", "due")
+        tap(panel, "choose_due")                                    # "Today", first
+        self.assertEqual(panel.client.writes[-1][1], {"dueDate": date.today().isoformat()})
+        self.assertEqual(panel.picker, "edit")
+
+    def test_a_status_from_edit_changes_it_and_goes_back_to_the_task(self):
+        panel = self._editing()
+        task_id = panel.detail_task_id
+        tap(panel, "set_status", "someday")
+        self.assertEqual(panel.client.writes[-1], (task_id, {"status": "someday"}))
+        self.assertEqual((panel.mode, panel.detail_task_id, panel.editing), ("detail", task_id, False))
+
+    def test_swiping_right_steps_back_one_screen_at_a_time(self):
+        panel = self._editing()
+        tap(panel, "pick", "where")
+        panel.handle_gesture(Gesture("swipe", 200, 300, dx=300))
+        self.assertEqual(panel.picker, "edit")
+        panel.handle_gesture(Gesture("swipe", 200, 300, dx=300))
+        self.assertEqual(panel.mode, "detail")
+
+    def test_swiping_left_on_a_non_inbox_task_skips_nothing(self):
+        panel = make_panel([task(1), task(2)])
+        panel.refresh()
+        panel.draw(force=True)
+        tap(panel, "open")
+        opened = panel.detail_task_id
+        panel.handle_gesture(Gesture("swipe", 300, 300, dx=-300))
+        self.assertEqual(panel.detail_task_id, opened)
+
+
+class TestProcessing(unittest.TestCase):
+    AREAS = [Area("a1", "Digital")]
+    PROJECTS = [Project("p1", "sowr", "a1")]
+
+    def _tap(self, panel, kind, key=None):
+        box = next(b for b in panel.hitboxes if b.kind == kind and (key is None or b.key == key))
+        panel.handle_tap(((box.x0 + box.x1) // 2, (box.y0 + box.y1) // 2))
+
+    def _panel(self, n=3, **kw):
+        panel = make_panel([], view="inbox", **kw)
+        panel.client = StubClient(
+            [inbox(i, contexts=["@home"] if i == 1 else []) for i in range(1, n + 1)],
+            self.AREAS, self.PROJECTS,
+        )
+        panel.refresh()
+        panel.draw(force=True)
+        self._tap(panel, "open")      # oldest first: task-1
+        self.assertEqual(panel.detail_task_id, "task-1")
+        return panel
+
+    def test_filing_under_a_project_writes_both_ids_and_returns_to_the_task(self):
+        panel = self._panel()
+        self._tap(panel, "pick", "where")
+        self.assertEqual((panel.mode, panel.picker), ("picker", "where"))
+        self._tap(panel, "choose_where", "project:p1")
+        self.assertEqual(panel.client.writes[-1], ("task-1", {"projectId": "p1", "areaId": None}))
+        self.assertEqual(panel.mode, "detail")
+        self.assertEqual((panel._find("task-1").project, panel._find("task-1").area), ("sowr", "Digital"))
+
+    def test_an_area_alone_clears_the_project(self):
+        panel = self._panel()
+        self._tap(panel, "pick", "where")
+        self._tap(panel, "choose_where", "area:a1")
+        self.assertEqual(panel.client.writes[-1][1], {"projectId": None, "areaId": "a1"})
+
+    def test_contexts_toggle_in_place(self):
+        panel = self._panel()
+        self._tap(panel, "pick", "contexts")
+        self._tap(panel, "toggle_context", "@home")
+        self.assertEqual(panel.client.writes[-1][1], {"contexts": []})
+        self.assertEqual(panel.mode, "picker")
+
+    def test_a_due_date_is_written_bare_and_clear_writes_null(self):
+        panel = self._panel()
+        self._tap(panel, "pick", "due")
+        self._tap(panel, "choose_due", "2026-10-24")
+        self.assertEqual(panel.client.writes[-1][1], {"dueDate": "2026-10-24"})
+        self.assertEqual(panel._find("task-1").due_date, datetime(2026, 10, 24))
+        self.assertEqual(panel.mode, "detail")
+        self._tap(panel, "pick", "due")
+        self._tap(panel, "choose_due", "")
+        self.assertEqual(panel.client.writes[-1][1], {"dueDate": None})
+
+    def test_a_status_sends_it_on_and_opens_the_next_inbox_task(self):
+        panel = self._panel()
+        self._tap(panel, "set_status", "next")
+        self.assertEqual(panel.client.writes[-1], ("task-1", {"status": "next"}))
+        self.assertEqual((panel.mode, panel.detail_task_id), ("detail", "task-2"))
+        self._tap(panel, "set_status", "someday")
+        self.assertEqual(panel.detail_task_id, "task-3")
+        self._tap(panel, "set_status", "waiting")
+        self.assertEqual((panel.mode, panel.view), ("list", "inbox"))
+        self.assertEqual(panel._inbox_count(), 0)
+
+    def test_completing_from_processing_also_moves_on(self):
+        panel = self._panel()
+        with mock.patch("panel.app.time.sleep"):
+            self._tap(panel, "complete")
+        self.assertEqual(panel.detail_task_id, "task-2")
+
+    def test_a_failed_write_restores_the_task_and_the_screen(self):
+        panel = self._panel()
+
+        def fail(task_id, fields):
+            from panel.client import MindwtrError
+            raise MindwtrError("boom")
+
+        panel.client.update_task = fail
+        self._tap(panel, "set_status", "next")
+        self.assertEqual((panel.mode, panel.detail_task_id), ("detail", "task-1"))
+        self.assertEqual(panel._find("task-1").status, "inbox")
+        self.assertIsNotNone(panel.stale_since)
+
+    def test_swiping_left_skips_to_the_next_inbox_task_and_wraps(self):
+        panel = self._panel()
+        for expected in ("task-2", "task-3", "task-1"):
+            panel.handle_gesture(Gesture("swipe", 300, 400, dx=-300))
+            self.assertEqual((panel.mode, panel.detail_task_id), ("detail", expected))
+        self.assertEqual(panel.client.writes, [])          # skipping writes nothing
+        self.assertEqual(panel._inbox_count(), 3)
+
+    def test_skipping_is_gated_by_the_touch_lock(self):
+        panel = self._panel()
+        self._tap(panel, "toggle_touch_lock")
+        panel.handle_gesture(Gesture("swipe", 300, 400, dx=-300))
+        self.assertEqual(panel.detail_task_id, "task-1")
+
+    def test_a_status_on_the_last_task_comes_back_round_to_a_skipped_one(self):
+        panel = self._panel()
+        panel.handle_gesture(Gesture("swipe", 300, 400, dx=-300))   # skip task-1
+        self._tap(panel, "set_status", "next")                      # task-2
+        self._tap(panel, "set_status", "next")                      # task-3, last
+        self.assertEqual(panel.detail_task_id, "task-1")
+
+    def test_the_sort_button_is_saved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "state.json"
+            panel = make_panel([task(1)], state_path=state, sort_newest=True)
+            panel.refresh()
+            panel.draw(force=True)
+            self._tap(panel, "sort_toggle")
+            self.assertEqual(json.loads(state.read_text()), {"sort_newest": False})
+
+    def test_swiping_right_leaves_a_picker_but_turns_the_date_pickers_month(self):
+        panel = self._panel()
+        self._tap(panel, "pick", "where")
+        panel.handle_gesture(Gesture("swipe", 200, 300, dx=300))
+        self.assertEqual(panel.mode, "detail")
+        self._tap(panel, "pick", "due")
+        panel.handle_gesture(Gesture("swipe", 200, 300, dx=300))
+        self.assertEqual(panel.mode, "picker")
+        self.assertIsNotNone(panel.picker_month)
+
+    def test_the_title_row_goes_back_to_the_task(self):
+        panel = self._panel()
+        self._tap(panel, "pick", "contexts")
+        self._tap(panel, "back")
+        self.assertEqual((panel.mode, panel.detail_task_id), ("detail", "task-1"))
+
+    def test_touch_lock_gates_the_pickers_too(self):
+        panel = self._panel()
+        self._tap(panel, "pick", "where")
+        self._tap(panel, "toggle_touch_lock")
+        self._tap(panel, "choose_where", "project:p1")
+        self.assertEqual(panel.client.writes, [])
 
 
 if __name__ == "__main__":

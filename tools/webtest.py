@@ -38,13 +38,12 @@ from dataclasses import replace
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import List
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from panel.app import Panel  # noqa: E402
-from panel.client import MindwtrError, Task  # noqa: E402
+from panel.client import MindwtrError, Store, apply_fields  # noqa: E402
 from panel.config import Config  # noqa: E402
 from panel.theme import HEIGHT, WHITE, WIDTH  # noqa: E402
 
@@ -242,27 +241,28 @@ class CapturingPngDisplay:
 
 class FixtureClient:
     """Stands in for MindwtrClient against tests/fixtures/tasks.json — no
-    network calls, so complete()/update_checklist() are safe to try
-    repeatedly without touching real Mindwtr data."""
+    network calls, so completing, starring and processing are safe to try
+    repeatedly without touching real Mindwtr data. Writes go through the
+    same apply_fields the panel uses, so what comes back is what it expects."""
 
-    def __init__(self, tasks: List[Task]):
-        self._tasks = {t.id: t for t in tasks}
-        self._order = [t.id for t in tasks]
+    def __init__(self, store: Store):
+        self._store = store
 
-    def fetch(self, view: str, limit: int) -> List[Task]:
-        tasks = [self._tasks[i] for i in self._order if i in self._tasks]
-        if view == "focus":
-            tasks = [t for t in tasks if t.focused] + [t for t in tasks if not t.focused]
-        return tasks[:limit]
+    def fetch(self, limit: int) -> Store:
+        return replace(self._store, tasks=self._store.tasks[:limit])
+
+    def data_etag(self) -> str:
+        return ""
 
     def complete(self, task_id: str) -> None:
-        self._order = [i for i in self._order if i != task_id]
-        self._tasks.pop(task_id, None)
+        tasks = [t for t in self._store.tasks if t.id != task_id]
+        self._store = replace(self._store, tasks=tasks)
 
-    def update_checklist(self, task_id: str, checklist) -> None:
-        task = self._tasks.get(task_id)
-        if task is not None:
-            self._tasks[task_id] = replace(task, checklist=checklist)
+    def update_task(self, task_id: str, fields) -> None:
+        s = self._store
+        tasks = [apply_fields(t, fields, s.projects, s.areas) if t.id == task_id else t
+                 for t in s.tasks]
+        self._store = replace(s, tasks=tasks)
 
 
 def poll_loop(panel: Panel, lock: threading.Lock, stop: threading.Event) -> None:
