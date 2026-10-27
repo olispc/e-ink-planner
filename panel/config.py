@@ -29,7 +29,8 @@ def _load_dotenv(path: Path) -> None:
 
 
 def read_state(path: Optional[Path]) -> dict:
-    """What the panel saved about itself (the rotate button's orientation).
+    """What the panel saved about itself: the rotate button's orientation and
+    the sort direction.
     A missing or damaged file is simply "nothing saved" — never a startup
     error."""
     if path is None or not path.exists():
@@ -47,12 +48,20 @@ def read_saved_rotation(path: Optional[Path]) -> Optional[int]:
     return value if value in (0, 90, 180, 270) else None
 
 
-def save_rotation(path: Path, rotation: int) -> None:
-    """Atomic (write then rename) so a power cut mid-write can't leave a
-    half-written file that would silently drop the saved orientation."""
+def read_saved_sort(path: Optional[Path]) -> Optional[bool]:
+    """The sort direction last chosen with the header's sort button, if any."""
+    value = read_state(path).get("sort_newest")
+    return value if isinstance(value, bool) else None
+
+
+def save_state(path: Path, **values) -> None:
+    """Merge `values` into the saved state. Atomic (write then rename) so a
+    power cut mid-write can't leave a half-written file that would silently
+    drop what was saved."""
+    state = {**read_state(path), **values}
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps({"rotation": rotation}))
+    tmp.write_text(json.dumps(state))
     os.replace(tmp, path)
 
 
@@ -91,9 +100,13 @@ class Config:
     # mounted: 0 | 90 | 180 | 270. See panel/rotation.py. Portrait (270) is
     # the default, because that's how the panel is mounted.
     rotation: int = 270
-    # Where the rotate button remembers its choice across restarts. None (the
-    # default) means nothing is written — tests and the browser tester.
+    # Where the rotate and sort buttons remember their choices across
+    # restarts. None (the default) means nothing is written — tests and the
+    # browser tester.
     state_path: Optional[Path] = None
+    # Newest-created first, unless the sort button last chose otherwise (it
+    # is saved, like rotation: a deploy or crash shouldn't flip the list).
+    sort_newest: bool = True
     # The screen lock's code (digits). Empty means a tap on the lock screen
     # unlocks it: it still hides the tasks, it just doesn't keep anyone out.
     passcode: str = ""
@@ -136,6 +149,7 @@ class Config:
             full_refresh=os.environ.get("PANEL_FULL_REFRESH", "fast"),
             rotation=configured if saved is None else saved,
             state_path=state_path,
+            sort_newest=read_saved_sort(state_path) is not False,
             passcode=_passcode(os.environ.get("PANEL_PASSCODE", "")),
             lock_images=Path(lock_images) if Path(lock_images).is_absolute() else REPO_ROOT / lock_images,
             start_locked=True,

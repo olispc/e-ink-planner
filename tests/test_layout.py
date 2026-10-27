@@ -8,7 +8,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from panel.client import ChecklistItem, Task  # noqa: E402
+from dataclasses import replace  # noqa: E402
+
+from panel.client import Area, ChecklistItem, Project, Task  # noqa: E402
+from panel.pickers import month_index, render_picker  # noqa: E402
 from panel.layout import (  # noqa: E402
     _format_due, _organize_tasks, _relative_age, compute_group_order, hit, render, render_detail,
 )
@@ -38,12 +41,12 @@ def item(n: int, completed: bool = False, title: str = None) -> ChecklistItem:
     return ChecklistItem(id="item-%d" % n, title=title or "Item %d" % n, completed=completed)
 
 
-# The header's own controls (home, focus-sticky, sort direction, area/
+# The header's own controls (view tabs, focus-sticky, sort direction, area/
 # project/due toggles, dark mode, lock) are always present regardless of task content — real,
 # static hitboxes, not something tests should mistake for "the header has
-# nothing tappable".
+# nothing tappable". The active tab is "home" on the list ("back" on a task).
 HEADER_CONTROL_KINDS = {
-    "home", "focus_sticky", "sort_toggle", "toggle_project_view", "toggle_area_view",
+    "home", "view", "focus_sticky", "sort_toggle", "toggle_project_view", "toggle_area_view",
     "toggle_due_first", "toggle_dark", "toggle_touch_lock", "lock_screen", "toggle_rotate",
 }
 
@@ -76,7 +79,7 @@ class TestRender(unittest.TestCase):
         self.assertNotEqual(with_due.tobytes(), without.tobytes())
 
     def test_header_controls_are_always_present(self):
-        rendered = render([task(i) for i in range(ROWS)], "next")
+        rendered = render([task(i) for i in range(ROWS)], "focus")
         self.assertEqual({b.kind for b in rendered.hitboxes} & HEADER_CONTROL_KINDS, HEADER_CONTROL_KINDS)
 
     def test_empty_list_renders_without_task_hitboxes(self):
@@ -536,7 +539,7 @@ class TestDetailRendering(unittest.TestCase):
         self.assertEqual([b for b in rendered.hitboxes if b.kind == "toggle"], [])
 
     def test_six_checklist_items_fit_without_a_pager(self):
-        # The footer is a bare rule and progress rides the meta line, so a
+        # The footer is a bare rule and progress rides the stacked row, so a
         # six-item checklist (a normal shopping list) needs no paging at all.
         rendered = render_detail(task(1, checklist=[item(n) for n in range(6)]))
         self.assertEqual(len([b for b in rendered.hitboxes if b.kind == "toggle"]), 6)
@@ -549,7 +552,7 @@ class TestDetailRendering(unittest.TestCase):
         self.assertEqual(len(pagers), 2)
         self.assertLessEqual(pagers[0].y1, HEIGHT - COLLAPSED_FOOTER_H)
 
-    def test_header_title_goes_back(self):
+    def test_active_tab_goes_back(self):
         rendered = render_detail(task(1))
         box = hit(rendered.hitboxes, (20, 20))
         self.assertEqual(box.kind, "back")
@@ -558,7 +561,7 @@ class TestDetailRendering(unittest.TestCase):
         # The whole bar stays: same control hitboxes as the list's, so lock,
         # dark and the view toggles are reachable without leaving the task.
         detail = {b.kind for b in render_detail(task(1)).hitboxes if b.y0 == 0}
-        listing = {b.kind for b in render([task(1)], "next").hitboxes if b.y0 == 0}
+        listing = {b.kind for b in render([task(1)], "focus").hitboxes if b.y0 == 0}
         self.assertEqual(detail, (listing - {"home"}) | {"back"})
 
     def test_title_checkbox_completes_the_task(self):
@@ -814,9 +817,9 @@ class TestHeaderCluster(unittest.TestCase):
         r = render([task(1)], view)
         return [b for b in r.hitboxes if b.y1 <= HEADER_H]
 
-    def test_header_hitboxes_never_overlap_for_any_view_title(self):
-        from panel.layout import VIEW_TITLES
-        for view in VIEW_TITLES:
+    def test_header_hitboxes_never_overlap_for_any_view(self):
+        from panel.layout import VIEW_TABS
+        for view in VIEW_TABS:
             boxes = sorted(self._header_boxes(view), key=lambda b: b.x0)
             for a, b in zip(boxes, boxes[1:]):
                 self.assertLessEqual(a.x1, b.x0, "%s: %s overlaps %s" % (view, a.kind, b.kind))
@@ -898,7 +901,7 @@ class TestPortrait(unittest.TestCase):
             self.assertEqual(kinds & self.CONTROLS, self.CONTROLS)
 
     def test_controls_are_big_equal_slots_that_do_not_overlap_the_title_row(self):
-        rendered = render(self.tasks(), "next", portrait=True)
+        rendered = render(self.tasks(), "focus", portrait=True)
         controls = sorted((b for b in rendered.hitboxes if b.kind in self.CONTROLS), key=lambda b: b.x0)
         self.assertEqual(len(controls), 9)
         for a, b in zip(controls, controls[1:]):
@@ -916,12 +919,16 @@ class TestPortrait(unittest.TestCase):
             for b in rendered.hitboxes:
                 self.assertTrue(0 <= b.x0 < b.x1 <= 480 and 0 <= b.y0 < b.y1 <= 800, b)
 
-    def test_longest_title_does_not_reach_the_status_text(self):
-        # "NEXT ACTIONS" is the widest title; its tap zone must stop before
-        # the "updated" text rather than run under it.
-        rendered = render(self.tasks(), "next", portrait=True)
-        title = next(b for b in rendered.hitboxes if b.kind == "home")
-        self.assertLess(title.x1, 300)
+    def test_tabs_do_not_reach_the_status_text(self):
+        # The last tab's tap zone must stop before the "updated" text rather
+        # than run under it.
+        rendered = render(self.tasks(), "focus", portrait=True)
+        tabs = [b for b in rendered.hitboxes if b.kind in ("home", "view")]
+        self.assertEqual(len(tabs), 5)
+        self.assertLess(max(b.x1 for b in tabs), 300)
+        from panel.theme import DETAIL_ROW_H
+        for b in tabs:
+            self.assertGreaterEqual(b.x1 - b.x0, DETAIL_ROW_H)   # the ~9mm tap floor
 
     def test_detail_checklist_fits_more_items(self):
         r = render_detail(task(1, checklist=[item(n) for n in range(30)]), portrait=True)
@@ -938,6 +945,260 @@ class TestPortrait(unittest.TestCase):
         dark = render(self.tasks(), "next", portrait=True, dark=True).image
         self.assertEqual(dark.getpixel((0, 0)), 0)
         self.assertNotEqual(light.getpixel((0, 0)), 0)
+
+
+class TestViewTabs(unittest.TestCase):
+    def test_active_tab_is_home_and_the_rest_switch_view(self):
+        tabs = [b for b in render([task(1)], "inbox").hitboxes if b.kind in ("home", "view")]
+        self.assertEqual([(b.kind, b.key) for b in sorted(tabs, key=lambda b: b.x0)], [
+            ("view", "focus"), ("home", "inbox"), ("view", "waiting"), ("view", "someday"),
+            ("view", "done"),
+        ])
+
+    def test_landscape_tabs_end_before_the_control_cluster(self):
+        boxes = render([task(1)], "focus").hitboxes
+        last_tab = max(b.x1 for b in boxes if b.kind in ("home", "view"))
+        first_control = min(b.x0 for b in boxes if b.kind == "focus_sticky")
+        self.assertLessEqual(last_tab, first_control)
+
+    def test_inbox_count_badge_draws(self):
+        without = render([task(1)], "focus").image
+        with_count = render([task(1)], "focus", inbox_count=3).image
+        self.assertNotEqual(without.tobytes(), with_count.tobytes())
+
+
+def inbox_task(n=1, **kw):
+    return replace(task(n, **kw), status="inbox")
+
+
+class TestProcessingView(unittest.TestCase):
+    def kinds(self, rendered, kind):
+        return [b for b in rendered.hitboxes if b.kind == kind]
+
+    def test_an_inbox_task_gets_the_processing_rows_instead_of_its_checklist(self):
+        r = render_detail(inbox_task(checklist=[item(1)]), view="inbox")
+        self.assertEqual([b.key for b in self.kinds(r, "pick")], ["where", "contexts", "due"])
+        self.assertEqual([b.key for b in self.kinds(r, "set_status")], ["next", "waiting", "someday"])
+        self.assertEqual(self.kinds(r, "toggle"), [])
+        self.assertEqual(len(self.kinds(r, "complete")), 1)   # done stays the checkbox
+
+    def test_other_tasks_get_only_the_edit_line(self):
+        r = render_detail(task(1, checklist=[item(n) for n in range(8)]))
+        self.assertEqual([b.key for b in self.kinds(r, "pick")], ["edit"])
+        self.assertEqual(self.kinds(r, "set_status"), [])
+
+    def test_the_project_line_is_a_full_tap_target_clear_of_its_neighbours(self):
+        for t in (task(1, checklist=[item(n) for n in range(8)]),
+                  task(2, title="word " * 30, description="line\n" * 10, project="P")):
+            for portrait in (False, True):
+                r = render_detail(t, portrait=portrait)
+                where = self.kinds(r, "pick")[0]
+                self.assertGreaterEqual(where.y1 - where.y0, 44)
+                for other in r.hitboxes:
+                    if other is not where and other.kind in ("star", "toggle", "expand_item", "page"):
+                        self.assertTrue(other.y1 <= where.y0 or other.y0 >= where.y1, (other, where))
+
+    def test_checkbox_and_star_are_centred_on_the_title_however_long(self):
+        from panel.theme import BOX_X, DETAIL_STAR_ZONE_W
+        # No descenders, so the text's dark extent is cap top to baseline.
+        for title in ("Short", "Some words that run on and on " * 2, "Some words " * 12):
+            for portrait in (False, True):
+                r = render_detail(task(1, title=title), portrait=portrait)
+                complete = self.kinds(r, "complete")[0]
+                star = self.kinds(r, "star")[0]
+                self.assertEqual((complete.y0, complete.y1), (star.y0, star.y1))
+                px, w = r.image.load(), r.image.size[0]
+                rows = range(complete.y0, complete.y1 - 2)   # above the closing rule
+                box = [y for y in rows if px[BOX_X, y] == BLACK]
+                text = [y for y in rows
+                        if any(px[x, y] == BLACK for x in range(TEXT_X, w - MARGIN - DETAIL_STAR_ZONE_W))]
+                box_mid, text_mid = (box[0] + box[-1]) / 2, (text[0] + text[-1]) / 2
+                self.assertLessEqual(abs(box_mid - text_mid), 2, (title, portrait, box_mid, text_mid))
+
+    def test_the_field_icons_share_one_centre(self):
+        # The @ is a font glyph among drawn icons; it once sat 1.5px off them.
+        from PIL import Image, ImageDraw
+        from panel.layout import _draw_field_icon
+        for key, t in (("where", task(1, project="P")), ("where", task(1, area="A")),
+                       ("contexts", task(1)), ("due", task(1))):
+            for cy in (30, 31):
+                img = Image.new("1", (60, 60), WHITE)
+                _draw_field_icon(ImageDraw.Draw(img), key, t, 28, cy)
+                x0, y0, x1, y1 = Image.eval(img.convert("L"), lambda v: 255 - v).getbbox()
+                cx, mid = (x0 + x1 - 1) / 2, (y0 + y1 - 1) / 2
+                self.assertEqual(cx, 28, (key, t.area))
+                self.assertLessEqual(abs(mid - cy), 0.5, (key, t.area, mid))
+
+    def test_the_field_icons_centre_under_the_title_checkbox(self):
+        r = render_detail(task(1, project="P", contexts=["@a"], due_date=datetime(2026, 10, 24)))
+        px = r.image.load()
+        info = self.kinds(r, "pick")[0]
+        complete = self.kinds(r, "complete")[0]
+        def ink_cols(y0, y1):
+            return [x for x in range(0, TEXT_X) if any(px[x, y] == BLACK for y in range(y0, y1))]
+        box = ink_cols(complete.y0, complete.y1 - 2)      # above the title's rule
+        icons = ink_cols(info.y0 + 2, info.y1 - 6)
+        self.assertEqual((box[0] + box[-1]) / 2, (icons[0] + icons[-1]) / 2)
+
+    def test_the_title_has_equal_padding_above_and_below(self):
+        # Blank rows from the header's rule to the block's first ink, and from
+        # its last ink to its own rule. No descenders in these titles: the pad
+        # is measured to the baseline, so a descender hangs into it.
+        for title in ("Short", "Some words that run on and on " * 2, "Some words " * 12):
+            for portrait in (False, True):
+                img = render_detail(task(1, title=title), portrait=portrait).image
+                px, w = img.load(), img.size[0]
+                rule = lambda y: sum(px[x, y] == BLACK for x in range(w)) > w * 0.8  # noqa: E731
+                ink = lambda y: any(px[x, y] == BLACK for x in range(w))           # noqa: E731
+                y = 40
+                while not rule(y):
+                    y += 1
+                while rule(y):
+                    y += 1
+                header_end = y
+                while not ink(y):
+                    y += 1
+                above = y - header_end
+                while not rule(y):
+                    y += 1
+                b = y - 1
+                while not ink(b):
+                    b -= 1
+                self.assertEqual(above, y - b - 1, (title, portrait))
+
+    def test_checklist_boxes_centre_under_the_title_checkbox(self):
+        r = render_detail(task(1, checklist=[item(1), item(2, completed=True)]), expanded=True)
+        px = r.image.load()
+        complete = self.kinds(r, "complete")[0]
+        def ink_cols(y0, y1):
+            return [x for x in range(0, TEXT_X) if any(px[x, y] == BLACK for y in range(y0, y1))]
+        title_box = ink_cols(complete.y0, complete.y1 - 2)
+        for toggle in self.kinds(r, "toggle"):
+            cols = ink_cols(toggle.y0 + 4, toggle.y1 - 4)
+            self.assertEqual((cols[0] + cols[-1]) / 2, (title_box[0] + title_box[-1]) / 2)
+
+    def test_unset_fields_take_no_room_but_edit_stays_reachable(self):
+        full = task(1, project="P", contexts=["@a"], created_at=datetime(2026, 9, 1),
+                    due_date=datetime(2026, 10, 24))
+        bare = task(2)
+        tall = self.kinds(render_detail(full), "pick")[0]
+        short = self.kinds(render_detail(bare), "pick")[0]
+        self.assertGreater(tall.y1 - tall.y0, short.y1 - short.y0)
+        self.assertGreaterEqual(short.y1 - short.y0, 44)            # still a real target
+        # The Edit screen keeps its placeholders: a bare task's rows still say something.
+        self.assertNotEqual(render_picker("edit", bare).image.tobytes(),
+                            render_picker("edit", replace(bare, project="P")).image.tobytes())
+
+    def test_a_busy_info_block_keeps_its_tap_zone_clear_of_the_checklist(self):
+        busy = task(1, project="Home Server", contexts=["@computer", "@home", "@errands"],
+                    created_at=datetime(2026, 9, 1), due_date=datetime(2026, 10, 24),
+                    checklist=[item(n) for n in range(8)])
+        for portrait in (False, True):
+            r = render_detail(busy, portrait=portrait)
+            where = self.kinds(r, "pick")[0]
+            for other in r.hitboxes:
+                if other.kind in ("star", "toggle", "expand_item", "expand", "page"):
+                    self.assertTrue(other.y1 <= where.y0 or other.y0 >= where.y1, (other, where))
+
+    def test_a_task_filed_nowhere_still_says_so(self):
+        filed = render_detail(task(1, project="Home Server")).image
+        unfiled = render_detail(task(1)).image
+        self.assertNotEqual(filed.tobytes(), unfiled.tobytes())
+
+    def test_fits_above_the_footer_with_a_long_title_and_description(self):
+        t = inbox_task(title="word " * 40, description="line\n" * 20)
+        for portrait in (False, True):
+            r = render_detail(t, portrait=portrait, view="inbox")
+            bottom = (800 if portrait else HEIGHT) - COLLAPSED_FOOTER_H
+            self.assertLessEqual(max(b.y1 for b in self.kinds(r, "set_status")), bottom)
+
+
+class TestDoneView(unittest.TestCase):
+    def done(self, n, **kw):
+        return replace(task(n, **kw), status="done", completed_at=datetime(2026, 10, 22, 9))
+
+    def test_rows_restore_from_the_checkbox_and_have_no_star(self):
+        r = render([self.done(1), self.done(2)], "done", now=datetime(2026, 10, 22, 11))
+        kinds = [b.kind for b in r.hitboxes if b.y0 >= HEADER_H]
+        self.assertEqual(kinds.count("restore"), 2)
+        self.assertEqual(kinds.count("complete") + kinds.count("star"), 0)
+
+    def test_the_row_being_restored_shows_unticked(self):
+        rows = [self.done(1)]
+        ticked = render(rows, "done").image
+        lifting = render(rows, "done", completing="task-1").image
+        self.assertNotEqual(ticked.tobytes(), lifting.tobytes())
+
+    def test_a_done_tasks_detail_restores_and_has_no_star(self):
+        r = render_detail(self.done(1))
+        kinds = {b.kind for b in r.hitboxes}
+        self.assertIn("restore", kinds)
+        self.assertNotIn("complete", kinds)
+        self.assertNotIn("star", kinds)
+
+    def test_done_age_reads_in_minutes_and_hours_today(self):
+        from panel.layout import _relative_done
+        now = datetime(2026, 10, 22, 12, 0)
+        self.assertEqual(_relative_done(datetime(2026, 10, 22, 11, 59, 40), now), "done just now")
+        self.assertEqual(_relative_done(datetime(2026, 10, 22, 11, 35), now), "done 25m ago")
+        self.assertEqual(_relative_done(datetime(2026, 10, 22, 9, 0), now), "done 3h ago")
+        self.assertEqual(_relative_done(datetime(2026, 10, 21, 23, 0), now), "done yesterday")
+
+
+class TestPickers(unittest.TestCase):
+    AREAS = [Area("a1", "Digital"), Area("a2", "Home")]
+    PROJECTS = [Project("p1", "sowr", "a1"), Project("p2", "Loose", None)]
+
+    def boxes(self, rendered, kind):
+        return [b for b in rendered.hitboxes if b.kind == kind]
+
+    def test_where_lists_areas_with_their_projects_then_loose_projects(self):
+        r = render_picker("where", inbox_task(), self.PROJECTS, self.AREAS)
+        self.assertEqual([b.key for b in self.boxes(r, "choose_where")],
+                         ["none", "area:a1", "project:p1", "area:a2", "project:p2"])
+
+    def test_where_pages_when_there_are_many_projects(self):
+        projects = [Project("p%d" % i, "Project %d" % i, "a1") for i in range(30)]
+        first = render_picker("where", inbox_task(), projects, self.AREAS)
+        second = render_picker("where", inbox_task(), projects, self.AREAS, page=1)
+        self.assertEqual(len(self.boxes(first, "picker_page")), 2)
+        keys = lambda r: {b.key for b in self.boxes(r, "choose_where")}  # noqa: E731
+        self.assertFalse(keys(first) & keys(second))
+
+    def test_contexts_offers_those_in_use_and_the_tasks_own(self):
+        r = render_picker("contexts", inbox_task(contexts=["@phone"]), contexts=["@home", "@computer"])
+        self.assertEqual([b.key for b in self.boxes(r, "toggle_context")],
+                         ["@computer", "@home", "@phone"])
+
+    def test_due_grid_is_the_whole_month_plus_quick_dates(self):
+        now = datetime(2026, 10, 21)   # a Wednesday
+        r = render_picker("due", inbox_task(), now=now)
+        keys = [b.key for b in self.boxes(r, "choose_due")]
+        self.assertEqual(keys[:4], ["2026-10-21", "2026-10-22", "2026-10-26", ""])
+        self.assertEqual(keys[4:], ["2026-10-%02d" % d for d in range(1, 32)])
+        self.assertEqual(sorted(b.page for b in self.boxes(r, "month")),
+                         [month_index(2026, 9), month_index(2026, 11)])
+
+    def test_due_opens_on_the_due_month(self):
+        r = render_picker("due", inbox_task(due_date=datetime(2027, 2, 3)), now=datetime(2026, 10, 21))
+        self.assertIn("2027-02-28", [b.key for b in self.boxes(r, "choose_due")])
+
+    def test_edit_gives_any_task_the_processing_rows_with_its_status_boxed(self):
+        r = render_picker("edit", task(1))
+        self.assertEqual([b.key for b in self.boxes(r, "pick")], ["where", "contexts", "due"])
+        self.assertEqual([b.key for b in self.boxes(r, "set_status")], ["next", "waiting", "someday"])
+        as_waiting = render_picker("edit", replace(task(1), status="waiting")).image
+        self.assertNotEqual(r.image.tobytes(), as_waiting.tobytes())
+
+    def test_every_picker_stays_on_the_canvas_and_has_a_way_back(self):
+        t = inbox_task(contexts=["@home"])
+        for portrait in (False, True):
+            w, h = (480, 800) if portrait else (WIDTH, HEIGHT)
+            for kind in ("edit", "where", "contexts", "due"):
+                r = render_picker(kind, t, self.PROJECTS, self.AREAS, ["@a"], portrait=portrait)
+                self.assertEqual(len(self.boxes(r, "back")), 1)
+                for b in r.hitboxes:
+                    self.assertTrue(0 <= b.x0 < b.x1 <= w and 0 <= b.y0 < b.y1 <= h - COLLAPSED_FOOTER_H, b)
 
 
 if __name__ == "__main__":

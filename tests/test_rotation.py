@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from PIL import Image  # noqa: E402
 
-from panel.config import Config, read_saved_rotation, save_rotation  # noqa: E402
+from panel.config import Config, read_saved_rotation, read_saved_sort, save_state  # noqa: E402
 from panel.display import RotatedDisplay  # noqa: E402
 from panel.rotation import (  # noqa: E402
     PORTRAIT_TURN, ROTATIONS, is_portrait, to_logical_point, to_panel_image,
@@ -144,7 +144,7 @@ class TestConfigRotation(unittest.TestCase):
             self.assertEqual(Config.from_env().rotation, 270)
 
     def test_what_the_button_saved_beats_env_after_a_restart(self):
-        save_rotation(self.state, 270)
+        save_state(self.state, rotation=270)
         self.assertEqual(self.rotation("0"), 270)
 
     def test_env_applies_when_nothing_is_saved(self):
@@ -159,9 +159,23 @@ class TestConfigRotation(unittest.TestCase):
     def test_save_then_read_round_trips_and_leaves_no_temp_file(self):
         nested = Path(self.tmp.name) / "a" / "b" / "state.json"
         for r in ROTATIONS:
-            save_rotation(nested, r)
+            save_state(nested, rotation=r)
             self.assertEqual(read_saved_rotation(nested), r)
         self.assertEqual(sorted(p.name for p in nested.parent.iterdir()), ["state.json"])
+
+    def test_saving_one_choice_keeps_the_other(self):
+        save_state(self.state, rotation=0)
+        save_state(self.state, sort_newest=False)
+        self.assertEqual(read_saved_rotation(self.state), 0)
+        self.assertIs(read_saved_sort(self.state), False)
+
+    def test_sort_is_newest_first_unless_saved_otherwise(self):
+        with mock.patch.dict(os.environ, {"PANEL_STATE_PATH": str(self.state)}):
+            self.assertTrue(Config.from_env().sort_newest)
+            save_state(self.state, sort_newest=False)
+            self.assertFalse(Config.from_env().sort_newest)
+            self.state.write_text('{"sort_newest": "no"}')   # nonsense: the default
+            self.assertTrue(Config.from_env().sort_newest)
 
     def test_missing_file_and_no_path_mean_nothing_saved(self):
         self.assertIsNone(read_saved_rotation(self.state))

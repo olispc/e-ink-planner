@@ -15,6 +15,12 @@ from PIL import ImageFont
 WIDTH, HEIGHT = 800, 480
 
 HEADER_H = 64
+# The header's rule sits this far above its bottom edge.
+HEADER_RULE_UP = 8
+# Landscape header: centre of the control cluster's first button (focus-sticky).
+# Was 212 with four tabs; 260 leaves five tabs ~46px each before it and the
+# cluster still ends well short of "upd HH:MM".
+CLUSTER_X = 260
 FOOTER_H = 44
 ROW_H = 62
 ROWS = (HEIGHT - HEADER_H - FOOTER_H) // ROW_H  # 6
@@ -49,6 +55,21 @@ DETAIL_BOX_Y_OFFSET = (DETAIL_ROW_H - DETAIL_BOX) // 2
 # its text unfolds it to every line, each this much taller than the row.
 DETAIL_ITEM_LINE_H = 22
 DETAIL_ITEM_ARROW_W = 22      # right-edge column the triangle sits in
+
+# Blank rows between the header's rule and the detail view's title block
+# (checkbox or text, whichever reaches further), and again between that block
+# and the rule under it — equal, so the title sits centred in its band.
+DETAIL_TITLE_PAD = 10
+
+# The detail view's compact project / contexts / due rows: the Edit screen's
+# rows at a little over half their height. Too small to tap one by one, so the
+# block is a single target (three rows is well past the tap floor).
+DETAIL_INFO_LINE_H = 26
+
+# Processing an inbox task: the Next / Waiting / Someday row under its
+# project, contexts and due rows. Taller than a row (~11 mm): it is the tap
+# that sends the task on, so it should be the hardest one to miss.
+PROCESS_STATUS_H = 54
 
 # A star to toggle isFocusedToday from the panel itself, not just the phone.
 # Reserved as its own column at the right edge — a third tap zone per row,
@@ -96,7 +117,11 @@ COLLAPSED_FOOTER_H = 10
 # two rows — title/status on top, the seven controls spread across the full
 # width beneath — because the single landscape row is built for 800px.
 PORTRAIT_HEADER_H = 112
-PORTRAIT_HEADER_ROW_H = 56    # the title/status row; controls fill the rest
+PORTRAIT_HEADER_ROW_H = 56    # the tabs/status row; controls fill the rest
+# Each view tab's slot in portrait's top row. Landscape's tabs share out
+# whatever the fixed control cluster leaves (~46px each).
+PORTRAIT_TAB_W = 60
+TAB_ICON_SIZE = 20             # bigger than a toggle's: tabs are unboxed
 
 # The screen lock (panel/lockscreen.py). Keys are well past the ~9 mm tap floor
 # (landscape 96x84 px is ~20x17 mm) because a passcode typed on a wall is
@@ -190,6 +215,7 @@ class Fonts:
         self.clock_small = _font(_BOLD, 88)
         self.lock_date = _font(_REGULAR, 26)
         self.key = _font(_REGULAR, 36)
+        self.context_icon = _font(_BOLD, 19)   # the @ field icon: 17x17 ink, like the calendar
 
 
 _FONTS: Optional[Fonts] = None

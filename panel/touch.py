@@ -29,7 +29,9 @@ SWIPE_MIN_DX = 80
 @dataclass(frozen=True)
 class Gesture:
     """What one finger-down..finger-up stroke amounted to, in panel pixels.
-    `x, y` is where it landed; `dx` is the horizontal travel (swipes only)."""
+    `x, y` is where the stroke started — for a tap, where it landed; for a
+    swipe, which part of the screen it began on (the header bar's swipes
+    switch tabs). `dx` is the horizontal travel (swipes only)."""
     kind: str  # "tap" | "swipe"
     x: int
     y: int

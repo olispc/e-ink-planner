@@ -17,28 +17,40 @@ import sys
 import time
 from dataclasses import replace
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
-from .client import MindwtrClient, MindwtrError, Task
-from .config import Config, save_rotation
+from .client import (
+    Area, MindwtrClient, MindwtrError, Project, Task, apply_fields, checklist_field,
+)
+from .config import Config, read_state, save_state
 from .display import open_display
-from .layout import compute_group_order, hit, render, render_detail
+from .layout import (
+    VIEW_TABS, compute_group_order, hit, listed_order, render, render_detail, select_view,
+)
 from .lockscreen import load_background, pick_background, render_lock
+from .pickers import render_picker
 from .rotation import PORTRAIT_TURN, is_portrait
 from .theme import (
-    LOCK_COOLDOWN_MAX, LOCK_COOLDOWN_SECONDS, LOCK_FREE_TRIES, LOCK_KEYPAD_TIMEOUT,
+    LANDSCAPE, LOCK_COOLDOWN_MAX, LOCK_COOLDOWN_SECONDS, LOCK_FREE_TRIES, LOCK_KEYPAD_TIMEOUT,
+    PORTRAIT,
 )
 from .touch import open_touch
 
-# Per status query, so effectively "everything": the list view paginates, so
-# a lower cap silently hid every task past it (73 live next actions against
-# a cap of 50), and each completion then pulled a new task in from beyond it.
-FETCH_LIMIT = 500
+# Every open task in one request, at the server's own cap (LIST_PAGE_MAX_LIMIT).
+# The list view paginates, so a lower cap silently hid every task past it (73
+# live next actions against a cap of 50), and each completion then pulled a
+# new task in from beyond it. client.fetch says on stderr if it ever bites.
+FETCH_LIMIT = 1000
 
 # How long the checkmark+strikethrough confirmation holds before the row
 # disappears and the list reflows. Two static frames, not motion — see the
 # module docstring — so this is a deliberate pause, not a frame duration.
 CONFIRM_SECONDS = 0.45
+
+# How many panel completions are remembered for restoring (see
+# Panel.completions). Done tasks archive after Mindwtr's autoArchiveDays
+# anyway, so this only needs to outlast a few busy days.
+COMPLETIONS_KEPT = 100
 
 
 class Panel:
@@ -51,10 +63,34 @@ class Panel:
         # rotate button toggles it between landscape and portrait. Unlike the view toggles it
         # survives a restart — see _rotate.
         self.rotation: int = config.rotation
+        # Every open task, whatever its status; which of them the list shows
+        # is the view tab's job (layout.select_view), so switching tab never
+        # waits on the network. Areas and projects name them, and are what
+        # an inbox task can be filed under.
         self.tasks: List[Task] = []
+        self.areas: List[Area] = []
+        self.projects: List[Project] = []
+        if config.view in VIEW_TABS:
+            self.view: str = config.view
+        else:
+            print("PANEL_VIEW=%s has no tab; starting on focus" % config.view, file=sys.stderr)
+            self.view = "focus"
         self.stale_since: Optional[datetime] = None
-        self.mode: str = "list"  # "list" | "detail"
+        self.mode: str = "list"  # "list" | "detail" | "picker"
         self.detail_task_id: Optional[str] = None
+        # A picker (panel/pickers.py) is opened from an inbox task's detail
+        # view, for that task: "where", "contexts" or "due". Its page (where,
+        # contexts) or month (due, a pickers.month_index) resets on opening.
+        self.picker: Optional[str] = None
+        self.picker_page: int = 0
+        self.picker_month: Optional[int] = None
+        # A non-inbox task's Edit screen is itself a picker ("edit") whose
+        # rows open the others; while it's in play, a choice or "back" in one
+        # of those returns to it rather than to the task.
+        self.editing: bool = False
+        # The inbox task whose delete button has had its first tap: the next
+        # tap on it deletes, any other tap anywhere disarms (handle_tap).
+        self.delete_armed: Optional[str] = None
         # Done checklist items stack into one summary row by default; a tap
         # on it un-stacks them for this detail view. Resets on the next
         # "open" — see handle_tap — so reopening a task starts stacked again.
@@ -66,12 +102,13 @@ class Panel:
         # Which page of the list view is showing — clamped, not reset, by
         # render() itself when the list shrinks, same as checklist_page.
         self.list_page: int = 0
-        # Sorted by created date, oldest-first by default; the single sort
-        # button flips this. Focused-today tasks win over sort order
-        # whenever focus_sticky is on (the default) — starring something is
-        # a stronger signal than when it was created. "home" deliberately
-        # leaves all three of these alone (see handle_tap's "home" case).
-        self.sort_newest: bool = False
+        # Sorted by created date, newest-first unless the sort button last
+        # chose otherwise — that choice is saved (config.sort_newest), the
+        # rest of these toggles are not. Focused-today tasks win over sort
+        # order whenever focus_sticky is on (the default) — starring
+        # something is a stronger signal than when it was created. "home"
+        # deliberately leaves all of these alone (see handle_tap's "home" case).
+        self.sort_newest: bool = config.sort_newest
         self.focus_sticky: bool = True
         self.group_by_area: bool = False
         self.group_by_project: bool = False
@@ -95,6 +132,12 @@ class Panel:
         self.screen_locked: bool = False
         self._set_screen_locked(config.start_locked)
         self.lock_keypad: bool = False       # clock face, or the keypad face
+        # Swiped right on the clock face: the time and date are hidden and the
+        # face is just its picture (or blank), so nothing ticks and the panel
+        # sits on one image while you're away. Swipe left brings them back; a
+        # tap still wakes the keypad, which folds back to whichever face it
+        # came from.
+        self.lock_clock_hidden: bool = False
         self.lock_entry: str = ""            # digits typed so far
         self.lock_message: Optional[str] = None
         self.lock_failures: int = 0          # wrong codes since the last unlock
@@ -107,11 +150,22 @@ class Panel:
         self._group_order: Optional[dict] = None
         self._last_signature: Optional[tuple] = None
         self._last_etag: Optional[str] = None
+        # What each task completed on this panel was before — its status and
+        # star — so the Done tab can put it back exactly (the stored task
+        # doesn't keep either; Mindwtr's own undo only knows them from its
+        # toast). Saved in local/state.json so a restart doesn't lose it;
+        # the most recent COMPLETIONS_KEPT only. A task completed elsewhere
+        # restores to next, unstarred.
+        self.completions: Dict[str, list] = {
+            k: v for k, v in read_state(config.state_path).get("completions", {}).items()
+            if isinstance(v, list) and len(v) == 2
+        }
 
     # -- data -------------------------------------------------------------
     def refresh(self) -> None:
         try:
-            self.tasks = self.client.fetch(self.config.view, FETCH_LIMIT)
+            store = self.client.fetch(FETCH_LIMIT)
+            self.tasks, self.areas, self.projects = store.tasks, store.areas, store.projects
             self.stale_since = None
         except MindwtrError as exc:
             # Keep showing the last known list rather than blanking: stale but
@@ -125,10 +179,19 @@ class Panel:
             return None
         if self._group_order is None:
             self._group_order = compute_group_order(
-                self.tasks, self.sort_newest, self.focus_sticky,
+                self._visible(), self.sort_newest, self.focus_sticky,
                 self.group_by_area, self.group_by_project,
             )
         return self._group_order
+
+    def _visible(self) -> List[Task]:
+        return select_view(self.tasks, self.view)
+
+    def _inbox_count(self) -> int:
+        return sum(1 for t in self.tasks if t.status == "inbox")
+
+    def _contexts_in_use(self) -> List[str]:
+        return sorted({c for t in self.tasks for c in t.contexts})
 
     def _find(self, task_id: Optional[str]) -> Optional[Task]:
         if task_id is None:
@@ -140,12 +203,14 @@ class Panel:
         return is_portrait(self.rotation)
 
     def _shared_state(self) -> dict:
-        """The state both views draw with: the header toggles and orientation."""
+        """The state every screen draws with: the header's tabs and toggles,
+        and orientation."""
         return dict(
             sort_newest=self.sort_newest, focus_sticky=self.focus_sticky,
             group_by_area=self.group_by_area, group_by_project=self.group_by_project,
             due_first=self.due_first, dark=self.dark, touch_locked=self.touch_locked,
             portrait=self.portrait, rotation=self.rotation,
+            view=self.view, inbox_count=self._inbox_count(),
         )
 
     def _signature(self) -> tuple:
@@ -160,48 +225,68 @@ class Panel:
             # Nothing about the tasks: a background change while locked has
             # nothing to show. The minute is in it so the clock ticks.
             now = datetime.now()
+            if self.lock_clock_hidden and not self.lock_keypad:
+                # No minute in it: the hidden face never changes, so it never redraws.
+                return ("lock-hidden", self.dark, self.portrait)
             return (
                 "lock", now.strftime("%Y-%m-%d %H:%M"), self.lock_keypad,
                 len(self.lock_entry), self.lock_message, self.dark, self.portrait,
             )
-        if self.mode == "detail":
+        if self.mode in ("detail", "picker"):
             task = self._find(self.detail_task_id)
             if task is None:
                 return ("detail-missing", self.detail_task_id)
+            shared = tuple(sorted(self._shared_state().items()))
+            if self.mode == "picker":
+                # What the picker offers, too: a project renamed elsewhere
+                # changes the "where" list without touching this task.
+                return (
+                    "picker", self.picker, task, self.picker_page, self.picker_month,
+                    tuple(self.areas), tuple(self.projects), tuple(self._contexts_in_use()), shared,
+                )
             return (
                 "detail", task, self.checklist_expanded, self.checklist_page, self.expanded_items,
-                tuple(sorted(self._shared_state().items())),
+                self.delete_armed == task.id, shared,
             )
+        # The visible slice, not every open task: a change to a Someday task
+        # has nothing to redraw on the Focus list (bar the inbox badge).
         return (
-            "list", tuple(self.tasks), self.list_page,
+            "list", self.view, tuple(self._visible()), self._inbox_count(), self.list_page,
             self.sort_newest, self.focus_sticky, self.group_by_area, self.group_by_project,
             self.due_first, self.stale_since is not None, self.dark, self.touch_locked,
         )
 
     # -- output -----------------------------------------------------------
     def draw(self, force: bool = False, partial: bool = False) -> None:
-        if self.mode == "detail" and self._find(self.detail_task_id) is None:
+        if self.mode in ("detail", "picker") and self._find(self.detail_task_id) is None:
             # Completed or deleted elsewhere between polls — nothing left to
             # show here, so fall back rather than render a stale/missing task.
-            self.mode = "list"
-            self.detail_task_id = None
+            self.mode, self.detail_task_id, self.picker = "list", None, None
+            self.editing = False
             force = True
         signature = self._signature()
         if not force and signature == self._last_signature:
             return
         if self.screen_locked:
             rendered = self._render_lock()
+        elif self.mode == "picker":
+            rendered = render_picker(
+                self.picker, self._find(self.detail_task_id),
+                projects=self.projects, areas=self.areas, contexts=self._contexts_in_use(),
+                page=self.picker_page, month=self.picker_month, **self._shared_state(),
+            )
         elif self.mode == "detail":
             rendered = render_detail(
                 self._find(self.detail_task_id),
                 expanded=self.checklist_expanded, page=self.checklist_page,
-                expanded_items=self.expanded_items, **self._shared_state(),
+                expanded_items=self.expanded_items,
+                delete_armed=self.delete_armed == self.detail_task_id, **self._shared_state(),
             )
         else:
+            visible = self._visible()
             rendered = render(
-                self.tasks,
-                self.config.view,
-                total=len(self.tasks),
+                visible,
+                total=len(visible),
                 stale_since=self.stale_since,
                 page=self.list_page,
                 group_order=self._frozen_group_order(),
@@ -222,33 +307,64 @@ class Panel:
             now=now, portrait=self.portrait, keypad=self.lock_keypad,
             entered=len(self.lock_entry), code_length=len(self.config.passcode),
             message=self.lock_message, background=background, dark=self.dark,
+            clock=not self.lock_clock_hidden,
         )
 
     # -- interaction ------------------------------------------------------
     def handle_gesture(self, gesture) -> None:
         if gesture.kind == "swipe":
-            if self.touch_locked or self.screen_locked:
+            if self.screen_locked:
+                self._handle_lock_swipe(gesture.dx)
                 return
-            self.handle_swipe(gesture.dx)
+            if self.touch_locked:
+                return
+            self.handle_swipe(gesture.dx, gesture.y)
         else:
             self.handle_tap((gesture.x, gesture.y))
 
-    def handle_swipe(self, dx: int) -> None:
+    def handle_swipe(self, dx: int, y: Optional[int] = None) -> None:
         """Page-turn like a Kindle: dragging left reveals the next page,
-        dragging right the previous. The current screen's own pager hitboxes
+        dragging right the previous. A swipe that starts on the header bar
+        (`y`, the stroke's start, above header_h) turns the view tabs the
+        same way instead — Focus → Inbox → … → Done, wrapping — by borrowing
+        the next tab's own hitbox, so it does exactly what tapping that tab
+        does, from any screen. The current screen's own pager hitboxes
         already say which page that is (and wrap at the ends), so this just
         borrows them — a screen with no pager has nothing to turn.
 
-        On a task's detail view, dragging right from its first page (or a
-        detail with no pager) is "back" instead: it borrows the header's back
-        box the same way, so it is gated exactly like tapping it."""
+        On a task's detail view or a picker, dragging right from its first
+        page (or with no pager) is "back" instead: it borrows the screen's back
+        box the same way, so it is gated exactly like tapping it. The date
+        picker is the exception — its pager is the month, which swipes turn
+        either way; its title row is the way back."""
         boxes = getattr(self, "hitboxes", [])
-        if self.mode == "detail" and dx > 0 and self.checklist_page == 0:
+        header_h = (PORTRAIT if self.portrait else LANDSCAPE).header_h
+        if y is not None and y < header_h:
+            step = 1 if dx < 0 else -1
+            target = VIEW_TABS[(VIEW_TABS.index(self.view) + step) % len(VIEW_TABS)]
+            tab = next((b for b in boxes if b.kind == "view" and b.key == target), None)
+            if tab is not None:
+                self.handle_tap((tab.x0 + 1, tab.y0 + 1))
+            return
+        if self.mode == "detail" and dx < 0:
+            # An inbox task being processed: swiping on skips it, leaving it
+            # in the inbox untouched. Its processing view has no pager to
+            # turn (the description is capped there), so nothing is lost.
+            task = self._find(self.detail_task_id)
+            if task is not None and task.status == "inbox":
+                after = self._next_inbox(task)
+                if after is not None:
+                    self._open(after)
+                    self.draw(force=True, partial=True)
+                return
+        first_page = {"detail": self.checklist_page == 0,
+                      "picker": self.picker != "due" and self.picker_page == 0}.get(self.mode, False)
+        if first_page and dx > 0:
             back = next((b for b in boxes if b.kind == "back"), None)
             if back is not None:
                 self.handle_tap((back.x0 + 1, back.y0 + 1))
             return
-        pagers = [b for b in boxes if b.kind in ("list_page", "page")]
+        pagers = [b for b in boxes if b.kind in ("list_page", "page", "picker_page", "month")]
         if not pagers:
             return
         box = max(pagers, key=lambda b: b.x0) if dx < 0 else min(pagers, key=lambda b: b.x0)
@@ -270,16 +386,54 @@ class Panel:
         # through to nothing, so no future box kind can forget to check.
         if self.touch_locked and box.kind != "toggle_touch_lock":
             return
+        # Delete takes two taps on the same button; anything in between
+        # disarms it.
+        armed_for, self.delete_armed = self.delete_armed, None
         if box.kind == "back":
-            self.mode, self.detail_task_id = "list", None
+            # One screen back: a picker returns to the Edit screen it was
+            # opened from, or to its task; a task returns to the list.
+            if self.mode == "picker":
+                self._back_to_task()
+            else:
+                self.mode, self.detail_task_id = "list", None
             self.draw(force=True, partial=True)
+        elif box.kind == "view":
+            self._show_view(box.key)
         elif box.kind == "open":
-            self.mode, self.detail_task_id = "detail", box.task_id
-            self.checklist_expanded, self.checklist_page = False, 0
-            self.expanded_items = frozenset()
+            self._open(box.task_id)
+            self.draw(force=True, partial=True)
+        elif box.kind == "pick":
+            self.mode, self.picker, self.picker_page = "picker", box.key, 0
+            self.picker_month = None
+            if box.key == "edit":
+                self.editing = True
+            self.draw(force=True, partial=True)
+        elif box.kind == "picker_page":
+            self.picker_page = box.page
+            self.draw(force=True, partial=True)
+        elif box.kind == "month":
+            self.picker_month = box.page
+            self.draw(force=True, partial=True)
+        elif box.kind == "choose_where":
+            self._file_task(box.task_id, box.key)
+        elif box.kind == "toggle_context":
+            self._toggle_context(box.task_id, box.key)
+        elif box.kind == "choose_due":
+            self._set_due(box.task_id, box.key)
+        elif box.kind == "set_status":
+            self._set_status(box.task_id, box.key)
+        elif box.kind == "delete_task":
+            if armed_for == box.task_id:
+                self._delete_task(box.task_id)
+            else:
+                self.delete_armed = box.task_id
+                self.draw(force=True, partial=True)
+        elif box.kind == "delete_cancel":
             self.draw(force=True, partial=True)
         elif box.kind == "complete":
             self._complete_task(box.task_id)
+        elif box.kind == "restore":
+            self._restore_task(box.task_id)
         elif box.kind == "toggle":
             self._toggle_checklist_item(box.task_id, box.item_id)
         elif box.kind == "expand_item":
@@ -306,6 +460,7 @@ class Panel:
             self.draw(force=True, partial=True)
         elif box.kind == "sort_toggle":
             self.sort_newest = not self.sort_newest
+            self._save(sort_newest=self.sort_newest)
             self._group_order = None
             self.list_page = 0
             self.draw(force=True, partial=True)
@@ -342,6 +497,26 @@ class Panel:
         elif box.kind == "toggle_rotate":
             self._rotate()
 
+    def _open(self, task_id: Optional[str]) -> None:
+        """Show a task's detail view, folded and on its first page."""
+        self.mode, self.detail_task_id, self.picker = "detail", task_id, None
+        self.editing, self.delete_armed = False, None
+        self.checklist_expanded, self.checklist_page = False, 0
+        self.expanded_items = frozenset()
+
+    def _show_view(self, view: str) -> None:
+        """A tab tap: the list for `view`, from whatever screen is showing.
+        A different view starts on its first page with its groups freshly
+        ordered; the one already showing keeps its page (from a picker, its
+        tab is the way out to the list, not "home")."""
+        self.mode, self.detail_task_id, self.picker = "list", None, None
+        self.editing = False
+        if view != self.view:
+            self.view = view
+            self.list_page = 0
+            self._group_order = None
+        self.draw(force=True, partial=True)
+
     def _rotate(self) -> None:
         """Toggle between landscape and portrait (PORTRAIT_TURN). From any
         other configured orientation — 90 or 180 set in .env — the first tap
@@ -358,12 +533,18 @@ class Panel:
         # A page number from the old canvas means something else on this one
         # (6 rows a page vs 10), so start from the top rather than guess.
         self.list_page, self.checklist_page = 0, 0
-        if self.config.state_path is not None:
-            try:
-                save_rotation(self.config.state_path, self.rotation)
-            except OSError as exc:
-                print("could not save rotation: %s" % exc, file=sys.stderr)
+        self._save(rotation=self.rotation)
         self.draw(force=True)
+
+    def _save(self, **values) -> None:
+        """Remember a choice across restarts (local/state.json). Failing to is
+        said on stderr but never stops the tap that made it."""
+        if self.config.state_path is None:
+            return
+        try:
+            save_state(self.config.state_path, **values)
+        except OSError as exc:
+            print("could not save %s: %s" % (", ".join(values), exc), file=sys.stderr)
 
     # -- screen lock --------------------------------------------------------
     # Refresh rule for the screen lock, from what the panel showed (2026-10-20):
@@ -383,9 +564,20 @@ class Panel:
         if set_thorough is not None:
             set_thorough(locked)
 
+    def _handle_lock_swipe(self, dx: int) -> None:
+        """On the clock face, right hides the time and date, left shows them
+        again. Ignored on the keypad. Either way the photo is repainted by a
+        thorough full refresh — taking digits off a picture with a partial is
+        what left stencilled ghosts (see the refresh rule above)."""
+        if self.lock_keypad or (dx > 0) == self.lock_clock_hidden:
+            return
+        self.lock_clock_hidden = dx > 0
+        self.draw(force=True)
+
     def _lock_screen(self) -> None:
         self._set_screen_locked(True)
         self.lock_keypad, self.lock_entry, self.lock_message = False, "", None
+        self.lock_clock_hidden = False
         self.draw(force=True)
 
     def _unlock_screen(self) -> None:
@@ -463,22 +655,32 @@ class Panel:
         if task is None:
             return
         was_detail = self.mode == "detail" and self.detail_task_id == task_id
+        # Completing an inbox task from its detail view is processing it
+        # (the two-minute rule), so the panel moves on to the next one, as
+        # sending it on with a status does.
+        after = self._next_inbox(task) if was_detail and task.status == "inbox" else None
         # Held for one beat before the row is dropped and the list reflows
         # under it — visual confirmation the tap registered, without
         # relying on motion (see the module docstring on partial refresh).
         self._flash_completion(task)
         time.sleep(CONFIRM_SECONDS)
-        self.tasks = [t for t in self.tasks if t.id != task_id]
-        if was_detail:
+        self._remember_completion(task)
+        # Done, not gone: it turns up in the Done tab straight away, starless
+        # (completing clears the star, as the server does).
+        done = replace(task, status="done", focused=False, completed_at=datetime.now())
+        self.tasks = [done if t.id == task_id else t for t in self.tasks]
+        if after is not None:
+            self._open(after)
+        elif was_detail:
             self.mode, self.detail_task_id = "list", None
         self.draw(force=True, partial=True)
         try:
             self.client.complete(task_id)
         except MindwtrError as exc:
             print("complete failed: %s" % exc, file=sys.stderr)
-            self.tasks = [task] + self.tasks
+            self.tasks = [task if t.id == task_id else t for t in self.tasks]
             if was_detail:
-                self.mode, self.detail_task_id = "detail", task_id
+                self._open(task_id)
             if self.stale_since is None:
                 self.stale_since = datetime.now()
             self.draw(force=True, partial=True)
@@ -489,6 +691,65 @@ class Panel:
         # and clearing the ghosting is the idle cleanup's job, not this one's.
         self.draw(partial=True)
 
+    def _remember_completion(self, task: Task) -> None:
+        self.completions.pop(task.id, None)
+        self.completions[task.id] = [task.status, task.focused]
+        while len(self.completions) > COMPLETIONS_KEPT:
+            self.completions.pop(next(iter(self.completions)))
+        self._save(completions=self.completions)
+
+    def _restore_task(self, task_id: str) -> None:
+        """Put a done task back as it was, as Mindwtr's own undo does
+        (undo-task-completion.ts): its previous status, its star (if the
+        focus limit has room — the server refuses one over it, and that's
+        fine), and, for a recurring task, without the next occurrence that
+        completing it generated. Its status goes first: if that fails nothing
+        has changed, whereas deleting the occurrence first could leave the
+        series with none."""
+        task = self._find(task_id)
+        if task is None or task.status != "done":
+            return
+        status, focused = self.completions.get(task_id, ["next", False])
+        follow_up = next((
+            t for t in self.tasks
+            if task.series_id and task.completed_at and t.id != task.id
+            and t.series_id == task.series_id and t.status != "done"
+            and t.created_at == task.completed_at
+        ), None)
+        was_detail = self.mode == "detail" and self.detail_task_id == task_id
+        # The tick lifts for a beat, then the row leaves Done.
+        self._flash_completion(task)
+        time.sleep(CONFIRM_SECONDS)
+        restored = replace(task, status=status, focused=focused, completed_at=None)
+        self.tasks = [restored if t.id == task_id else t for t in self.tasks
+                      if follow_up is None or t.id != follow_up.id]
+        if was_detail:
+            self._open(task_id)
+        self.draw(force=True, partial=True)
+        try:
+            self.client.update_task(task_id, {"status": status})
+        except MindwtrError as exc:
+            print("restore failed: %s" % exc, file=sys.stderr)
+            self.refresh()
+            if self.stale_since is None:
+                self.stale_since = datetime.now()
+            self.draw(force=True, partial=True)
+            return
+        if follow_up is not None:
+            try:
+                self.client.delete_task(follow_up.id)
+            except MindwtrError as exc:
+                print("could not remove recurring follow-up %s: %s" % (follow_up.id, exc), file=sys.stderr)
+        if focused:
+            try:
+                self.client.update_task(task_id, {"isFocusedToday": True})
+            except MindwtrError as exc:
+                print("star not restored: %s" % exc, file=sys.stderr)
+        if self.completions.pop(task_id, None) is not None:
+            self._save(completions=self.completions)
+        self.refresh()
+        self.draw(partial=True)
+
     def _flash_completion(self, task: Task) -> None:
         if self.mode == "detail" and self.detail_task_id == task.id:
             rendered = render_detail(
@@ -497,14 +758,45 @@ class Panel:
                 expanded_items=self.expanded_items, **self._shared_state(),
             )
         else:
+            visible = self._visible()
             rendered = render(
-                self.tasks, self.config.view, total=len(self.tasks),
+                visible, total=len(visible),
                 stale_since=self.stale_since, completing=task.id, page=self.list_page,
                 group_order=self._frozen_group_order(),
                 **self._shared_state(),
             )
         self.display.show_partial(rendered.image)
         self.hitboxes = rendered.hitboxes
+
+    def _patch_task(
+        self, task_id: str, fields: Dict[str, Any], navigate: Optional[Callable[[], None]] = None,
+    ) -> None:
+        """The optimistic write every edit shares: apply `fields` to the
+        local copy as the server will (client.apply_fields), make any screen
+        change, redraw, then PATCH. A failed write puts the task and the
+        screen back as they were and labels the panel offline; a good one
+        reconciles with a refresh."""
+        task = self._find(task_id)
+        if task is None:
+            return
+        screen = (self.mode, self.detail_task_id, self.picker, self.editing, self.picker_page)
+        updated = apply_fields(task, fields, self.projects, self.areas)
+        self.tasks = [updated if t.id == task_id else t for t in self.tasks]
+        if navigate is not None:
+            navigate()
+        self.draw(force=True, partial=True)
+        try:
+            self.client.update_task(task_id, fields)
+        except MindwtrError as exc:
+            print("update failed: %s" % exc, file=sys.stderr)
+            self.tasks = [task if t.id == task_id else t for t in self.tasks]
+            self.mode, self.detail_task_id, self.picker, self.editing, self.picker_page = screen
+            if self.stale_since is None:
+                self.stale_since = datetime.now()
+            self.draw(force=True, partial=True)
+            return
+        self.refresh()
+        self.draw(partial=True)
 
     def _toggle_checklist_item(self, task_id: str, item_id: str) -> None:
         task = self._find(task_id)
@@ -514,19 +806,96 @@ class Panel:
             replace(item, completed=not item.completed) if item.id == item_id else item
             for item in task.checklist
         ]
-        self.tasks = [
-            replace(task, checklist=new_checklist) if t.id == task_id else t
-            for t in self.tasks
-        ]
         # Composition of unchecked/done shifts under a toggle, so the page
         # index it was on may no longer mean the same thing — back to page 0.
         self.checklist_page = 0
+        self._patch_task(task_id, {"checklist": checklist_field(new_checklist)})
+
+    def _toggle_star(self, task_id: str) -> None:
+        task = self._find(task_id)
+        if task is None:
+            return
+        self._patch_task(task_id, {"isFocusedToday": not task.focused})
+
+    # -- processing an inbox task ---------------------------------------------
+    def _back_to_task(self) -> None:
+        """Leave a picker: to the Edit screen it came from, else the task."""
+        if self.editing and self.picker != "edit":
+            self.picker, self.picker_page = "edit", 0
+        else:
+            self.mode, self.picker, self.editing = "detail", None, False
+
+    def _file_task(self, task_id: str, key: str) -> None:
+        """A project (which brings its area: Mindwtr clears the task's own
+        areaId when it has a project), an area alone, or neither."""
+        kind, _, entity_id = key.partition(":")
+        self._patch_task(task_id, {
+            "projectId": entity_id if kind == "project" else None,
+            "areaId": entity_id if kind == "area" else None,
+        }, navigate=self._back_to_task)
+
+    def _toggle_context(self, task_id: str, context: str) -> None:
+        task = self._find(task_id)
+        if task is None:
+            return
+        if context in task.contexts:
+            contexts = [c for c in task.contexts if c != context]
+        else:
+            contexts = task.contexts + [context]
+        self._patch_task(task_id, {"contexts": contexts})
+
+    def _set_due(self, task_id: str, day: str) -> None:
+        """`day` is "YYYY-MM-DD", or "" to clear it. A bare date, as
+        Mindwtr's own processor writes one when no time is set."""
+        self._patch_task(task_id, {"dueDate": day or None}, navigate=self._back_to_task)
+
+    def _set_status(self, task_id: str, status: str) -> None:
+        """Send an inbox task on — the last step of processing it, so the
+        panel moves straight to the next inbox task (back to the inbox list
+        once there are none). From any other task's Edit screen it is just
+        a change, and goes back to the task."""
+        task = self._find(task_id)
+        if task is None:
+            return
+        if task.status != "inbox":
+            def back() -> None:
+                self.mode, self.picker, self.editing = "detail", None, False
+            self._patch_task(task_id, {"status": status}, navigate=back)
+            return
+        self._patch_task(task_id, {"status": status}, navigate=self._move_on_from(task))
+
+    def _move_on_from(self, task: Task) -> Callable[[], None]:
+        """What processing does once an inbox task has gone (sent on,
+        deleted): open the next one, or the inbox list when none is left.
+        Worked out before the task changes, while it still has a place in
+        the inbox's order."""
+        after = self._next_inbox(task)
+
+        def navigate() -> None:
+            if after is None:
+                self.mode, self.detail_task_id, self.picker = "list", None, None
+            else:
+                self._open(after)
+        return navigate
+
+    def _delete_task(self, task_id: str) -> None:
+        """Delete an inbox task — the second tap on its delete button — and
+        move on as sending it on does. Optimistic like every write; a failure
+        puts it and the screen back. Soft: it lands in Mindwtr's Trash."""
+        task = self._find(task_id)
+        if task is None:
+            return
+        screen = (self.mode, self.detail_task_id, self.picker)
+        navigate = self._move_on_from(task)
+        self.tasks = [t for t in self.tasks if t.id != task_id]
+        navigate()
         self.draw(force=True, partial=True)
         try:
-            self.client.update_checklist(task_id, new_checklist)
+            self.client.delete_task(task_id)
         except MindwtrError as exc:
-            print("checklist update failed: %s" % exc, file=sys.stderr)
-            self.tasks = [task if t.id == task_id else t for t in self.tasks]
+            print("delete failed: %s" % exc, file=sys.stderr)
+            self.tasks = self.tasks + [task]
+            self.mode, self.detail_task_id, self.picker = screen
             if self.stale_since is None:
                 self.stale_since = datetime.now()
             self.draw(force=True, partial=True)
@@ -534,29 +903,18 @@ class Panel:
         self.refresh()
         self.draw(partial=True)
 
-    def _toggle_star(self, task_id: str) -> None:
-        task = self._find(task_id)
-        if task is None:
-            return
-        new_focused = not task.focused
-        self.tasks = [
-            replace(t, focused=new_focused) if t.id == task_id else t for t in self.tasks
-        ]
-        # The heavier border/filled star show up immediately; re-sorting the
-        # compound focus view into its new position waits for the refresh()
-        # below, same as a completion's row-removal reflow.
-        self.draw(force=True, partial=True)
-        try:
-            self.client.set_focused(task_id, new_focused)
-        except MindwtrError as exc:
-            print("star update failed: %s" % exc, file=sys.stderr)
-            self.tasks = [task if t.id == task_id else t for t in self.tasks]
-            if self.stale_since is None:
-                self.stale_since = datetime.now()
-            self.draw(force=True, partial=True)
-            return
-        self.refresh()
-        self.draw(partial=True)
+    def _next_inbox(self, task: Task) -> Optional[str]:
+        """The inbox task listed after `task`, in the inbox list's own order
+        under the current toggles — wrapping to the top from the last, like
+        every pager, so skipped tasks come round again."""
+        frozen = self._frozen_group_order() if self.view == "inbox" else None
+        inbox = [t.id for t in listed_order(
+            select_view(self.tasks, "inbox"), self.sort_newest, self.focus_sticky,
+            self.group_by_area, self.group_by_project, self.due_first, frozen,
+        )]
+        if task.id not in inbox or len(inbox) < 2:
+            return None
+        return inbox[(inbox.index(task.id) + 1) % len(inbox)]
 
     # -- loop -------------------------------------------------------------
     def _peek_etag(self) -> Optional[str]:
