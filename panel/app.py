@@ -22,7 +22,7 @@ from typing import Any, Callable, Dict, List, Optional
 from .client import (
     Area, MindwtrClient, MindwtrError, Project, Task, apply_fields, checklist_field,
 )
-from .config import Config, save_state
+from .config import Config, read_state, save_state
 from .display import open_display
 from .layout import (
     VIEW_TABS, compute_group_order, hit, listed_order, render, render_detail, select_view,
@@ -31,7 +31,8 @@ from .lockscreen import load_background, pick_background, render_lock
 from .pickers import render_picker
 from .rotation import PORTRAIT_TURN, is_portrait
 from .theme import (
-    LOCK_COOLDOWN_MAX, LOCK_COOLDOWN_SECONDS, LOCK_FREE_TRIES, LOCK_KEYPAD_TIMEOUT,
+    LANDSCAPE, LOCK_COOLDOWN_MAX, LOCK_COOLDOWN_SECONDS, LOCK_FREE_TRIES, LOCK_KEYPAD_TIMEOUT,
+    PORTRAIT,
 )
 from .touch import open_touch
 
@@ -45,6 +46,11 @@ FETCH_LIMIT = 1000
 # disappears and the list reflows. Two static frames, not motion — see the
 # module docstring — so this is a deliberate pause, not a frame duration.
 CONFIRM_SECONDS = 0.45
+
+# How many panel completions are remembered for restoring (see
+# Panel.completions). Done tasks archive after Mindwtr's autoArchiveDays
+# anyway, so this only needs to outlast a few busy days.
+COMPLETIONS_KEPT = 100
 
 
 class Panel:
@@ -82,6 +88,9 @@ class Panel:
         # rows open the others; while it's in play, a choice or "back" in one
         # of those returns to it rather than to the task.
         self.editing: bool = False
+        # The inbox task whose delete button has had its first tap: the next
+        # tap on it deletes, any other tap anywhere disarms (handle_tap).
+        self.delete_armed: Optional[str] = None
         # Done checklist items stack into one summary row by default; a tap
         # on it un-stacks them for this detail view. Resets on the next
         # "open" — see handle_tap — so reopening a task starts stacked again.
@@ -123,6 +132,12 @@ class Panel:
         self.screen_locked: bool = False
         self._set_screen_locked(config.start_locked)
         self.lock_keypad: bool = False       # clock face, or the keypad face
+        # Swiped right on the clock face: the time and date are hidden and the
+        # face is just its picture (or blank), so nothing ticks and the panel
+        # sits on one image while you're away. Swipe left brings them back; a
+        # tap still wakes the keypad, which folds back to whichever face it
+        # came from.
+        self.lock_clock_hidden: bool = False
         self.lock_entry: str = ""            # digits typed so far
         self.lock_message: Optional[str] = None
         self.lock_failures: int = 0          # wrong codes since the last unlock
@@ -135,6 +150,16 @@ class Panel:
         self._group_order: Optional[dict] = None
         self._last_signature: Optional[tuple] = None
         self._last_etag: Optional[str] = None
+        # What each task completed on this panel was before — its status and
+        # star — so the Done tab can put it back exactly (the stored task
+        # doesn't keep either; Mindwtr's own undo only knows them from its
+        # toast). Saved in local/state.json so a restart doesn't lose it;
+        # the most recent COMPLETIONS_KEPT only. A task completed elsewhere
+        # restores to next, unstarred.
+        self.completions: Dict[str, list] = {
+            k: v for k, v in read_state(config.state_path).get("completions", {}).items()
+            if isinstance(v, list) and len(v) == 2
+        }
 
     # -- data -------------------------------------------------------------
     def refresh(self) -> None:
@@ -200,6 +225,9 @@ class Panel:
             # Nothing about the tasks: a background change while locked has
             # nothing to show. The minute is in it so the clock ticks.
             now = datetime.now()
+            if self.lock_clock_hidden and not self.lock_keypad:
+                # No minute in it: the hidden face never changes, so it never redraws.
+                return ("lock-hidden", self.dark, self.portrait)
             return (
                 "lock", now.strftime("%Y-%m-%d %H:%M"), self.lock_keypad,
                 len(self.lock_entry), self.lock_message, self.dark, self.portrait,
@@ -218,7 +246,7 @@ class Panel:
                 )
             return (
                 "detail", task, self.checklist_expanded, self.checklist_page, self.expanded_items,
-                shared,
+                self.delete_armed == task.id, shared,
             )
         # The visible slice, not every open task: a change to a Someday task
         # has nothing to redraw on the Focus list (bar the inbox badge).
@@ -251,7 +279,8 @@ class Panel:
             rendered = render_detail(
                 self._find(self.detail_task_id),
                 expanded=self.checklist_expanded, page=self.checklist_page,
-                expanded_items=self.expanded_items, **self._shared_state(),
+                expanded_items=self.expanded_items,
+                delete_armed=self.delete_armed == self.detail_task_id, **self._shared_state(),
             )
         else:
             visible = self._visible()
@@ -278,20 +307,28 @@ class Panel:
             now=now, portrait=self.portrait, keypad=self.lock_keypad,
             entered=len(self.lock_entry), code_length=len(self.config.passcode),
             message=self.lock_message, background=background, dark=self.dark,
+            clock=not self.lock_clock_hidden,
         )
 
     # -- interaction ------------------------------------------------------
     def handle_gesture(self, gesture) -> None:
         if gesture.kind == "swipe":
-            if self.touch_locked or self.screen_locked:
+            if self.screen_locked:
+                self._handle_lock_swipe(gesture.dx)
                 return
-            self.handle_swipe(gesture.dx)
+            if self.touch_locked:
+                return
+            self.handle_swipe(gesture.dx, gesture.y)
         else:
             self.handle_tap((gesture.x, gesture.y))
 
-    def handle_swipe(self, dx: int) -> None:
+    def handle_swipe(self, dx: int, y: Optional[int] = None) -> None:
         """Page-turn like a Kindle: dragging left reveals the next page,
-        dragging right the previous. The current screen's own pager hitboxes
+        dragging right the previous. A swipe that starts on the header bar
+        (`y`, the stroke's start, above header_h) turns the view tabs the
+        same way instead — Focus → Inbox → … → Done, wrapping — by borrowing
+        the next tab's own hitbox, so it does exactly what tapping that tab
+        does, from any screen. The current screen's own pager hitboxes
         already say which page that is (and wrap at the ends), so this just
         borrows them — a screen with no pager has nothing to turn.
 
@@ -301,6 +338,14 @@ class Panel:
         picker is the exception — its pager is the month, which swipes turn
         either way; its title row is the way back."""
         boxes = getattr(self, "hitboxes", [])
+        header_h = (PORTRAIT if self.portrait else LANDSCAPE).header_h
+        if y is not None and y < header_h:
+            step = 1 if dx < 0 else -1
+            target = VIEW_TABS[(VIEW_TABS.index(self.view) + step) % len(VIEW_TABS)]
+            tab = next((b for b in boxes if b.kind == "view" and b.key == target), None)
+            if tab is not None:
+                self.handle_tap((tab.x0 + 1, tab.y0 + 1))
+            return
         if self.mode == "detail" and dx < 0:
             # An inbox task being processed: swiping on skips it, leaving it
             # in the inbox untouched. Its processing view has no pager to
@@ -341,6 +386,9 @@ class Panel:
         # through to nothing, so no future box kind can forget to check.
         if self.touch_locked and box.kind != "toggle_touch_lock":
             return
+        # Delete takes two taps on the same button; anything in between
+        # disarms it.
+        armed_for, self.delete_armed = self.delete_armed, None
         if box.kind == "back":
             # One screen back: a picker returns to the Edit screen it was
             # opened from, or to its task; a task returns to the list.
@@ -374,8 +422,18 @@ class Panel:
             self._set_due(box.task_id, box.key)
         elif box.kind == "set_status":
             self._set_status(box.task_id, box.key)
+        elif box.kind == "delete_task":
+            if armed_for == box.task_id:
+                self._delete_task(box.task_id)
+            else:
+                self.delete_armed = box.task_id
+                self.draw(force=True, partial=True)
+        elif box.kind == "delete_cancel":
+            self.draw(force=True, partial=True)
         elif box.kind == "complete":
             self._complete_task(box.task_id)
+        elif box.kind == "restore":
+            self._restore_task(box.task_id)
         elif box.kind == "toggle":
             self._toggle_checklist_item(box.task_id, box.item_id)
         elif box.kind == "expand_item":
@@ -442,7 +500,7 @@ class Panel:
     def _open(self, task_id: Optional[str]) -> None:
         """Show a task's detail view, folded and on its first page."""
         self.mode, self.detail_task_id, self.picker = "detail", task_id, None
-        self.editing = False
+        self.editing, self.delete_armed = False, None
         self.checklist_expanded, self.checklist_page = False, 0
         self.expanded_items = frozenset()
 
@@ -506,9 +564,20 @@ class Panel:
         if set_thorough is not None:
             set_thorough(locked)
 
+    def _handle_lock_swipe(self, dx: int) -> None:
+        """On the clock face, right hides the time and date, left shows them
+        again. Ignored on the keypad. Either way the photo is repainted by a
+        thorough full refresh — taking digits off a picture with a partial is
+        what left stencilled ghosts (see the refresh rule above)."""
+        if self.lock_keypad or (dx > 0) == self.lock_clock_hidden:
+            return
+        self.lock_clock_hidden = dx > 0
+        self.draw(force=True)
+
     def _lock_screen(self) -> None:
         self._set_screen_locked(True)
         self.lock_keypad, self.lock_entry, self.lock_message = False, "", None
+        self.lock_clock_hidden = False
         self.draw(force=True)
 
     def _unlock_screen(self) -> None:
@@ -595,7 +664,11 @@ class Panel:
         # relying on motion (see the module docstring on partial refresh).
         self._flash_completion(task)
         time.sleep(CONFIRM_SECONDS)
-        self.tasks = [t for t in self.tasks if t.id != task_id]
+        self._remember_completion(task)
+        # Done, not gone: it turns up in the Done tab straight away, starless
+        # (completing clears the star, as the server does).
+        done = replace(task, status="done", focused=False, completed_at=datetime.now())
+        self.tasks = [done if t.id == task_id else t for t in self.tasks]
         if after is not None:
             self._open(after)
         elif was_detail:
@@ -605,7 +678,7 @@ class Panel:
             self.client.complete(task_id)
         except MindwtrError as exc:
             print("complete failed: %s" % exc, file=sys.stderr)
-            self.tasks = [task] + self.tasks
+            self.tasks = [task if t.id == task_id else t for t in self.tasks]
             if was_detail:
                 self._open(task_id)
             if self.stale_since is None:
@@ -616,6 +689,65 @@ class Panel:
         # Still tap-driven, so partial: the reconcile can differ from the
         # optimistic frame (an edit from another device landing meanwhile),
         # and clearing the ghosting is the idle cleanup's job, not this one's.
+        self.draw(partial=True)
+
+    def _remember_completion(self, task: Task) -> None:
+        self.completions.pop(task.id, None)
+        self.completions[task.id] = [task.status, task.focused]
+        while len(self.completions) > COMPLETIONS_KEPT:
+            self.completions.pop(next(iter(self.completions)))
+        self._save(completions=self.completions)
+
+    def _restore_task(self, task_id: str) -> None:
+        """Put a done task back as it was, as Mindwtr's own undo does
+        (undo-task-completion.ts): its previous status, its star (if the
+        focus limit has room — the server refuses one over it, and that's
+        fine), and, for a recurring task, without the next occurrence that
+        completing it generated. Its status goes first: if that fails nothing
+        has changed, whereas deleting the occurrence first could leave the
+        series with none."""
+        task = self._find(task_id)
+        if task is None or task.status != "done":
+            return
+        status, focused = self.completions.get(task_id, ["next", False])
+        follow_up = next((
+            t for t in self.tasks
+            if task.series_id and task.completed_at and t.id != task.id
+            and t.series_id == task.series_id and t.status != "done"
+            and t.created_at == task.completed_at
+        ), None)
+        was_detail = self.mode == "detail" and self.detail_task_id == task_id
+        # The tick lifts for a beat, then the row leaves Done.
+        self._flash_completion(task)
+        time.sleep(CONFIRM_SECONDS)
+        restored = replace(task, status=status, focused=focused, completed_at=None)
+        self.tasks = [restored if t.id == task_id else t for t in self.tasks
+                      if follow_up is None or t.id != follow_up.id]
+        if was_detail:
+            self._open(task_id)
+        self.draw(force=True, partial=True)
+        try:
+            self.client.update_task(task_id, {"status": status})
+        except MindwtrError as exc:
+            print("restore failed: %s" % exc, file=sys.stderr)
+            self.refresh()
+            if self.stale_since is None:
+                self.stale_since = datetime.now()
+            self.draw(force=True, partial=True)
+            return
+        if follow_up is not None:
+            try:
+                self.client.delete_task(follow_up.id)
+            except MindwtrError as exc:
+                print("could not remove recurring follow-up %s: %s" % (follow_up.id, exc), file=sys.stderr)
+        if focused:
+            try:
+                self.client.update_task(task_id, {"isFocusedToday": True})
+            except MindwtrError as exc:
+                print("star not restored: %s" % exc, file=sys.stderr)
+        if self.completions.pop(task_id, None) is not None:
+            self._save(completions=self.completions)
+        self.refresh()
         self.draw(partial=True)
 
     def _flash_completion(self, task: Task) -> None:
@@ -730,6 +862,13 @@ class Panel:
                 self.mode, self.picker, self.editing = "detail", None, False
             self._patch_task(task_id, {"status": status}, navigate=back)
             return
+        self._patch_task(task_id, {"status": status}, navigate=self._move_on_from(task))
+
+    def _move_on_from(self, task: Task) -> Callable[[], None]:
+        """What processing does once an inbox task has gone (sent on,
+        deleted): open the next one, or the inbox list when none is left.
+        Worked out before the task changes, while it still has a place in
+        the inbox's order."""
         after = self._next_inbox(task)
 
         def navigate() -> None:
@@ -737,8 +876,32 @@ class Panel:
                 self.mode, self.detail_task_id, self.picker = "list", None, None
             else:
                 self._open(after)
+        return navigate
 
-        self._patch_task(task_id, {"status": status}, navigate=navigate)
+    def _delete_task(self, task_id: str) -> None:
+        """Delete an inbox task — the second tap on its delete button — and
+        move on as sending it on does. Optimistic like every write; a failure
+        puts it and the screen back. Soft: it lands in Mindwtr's Trash."""
+        task = self._find(task_id)
+        if task is None:
+            return
+        screen = (self.mode, self.detail_task_id, self.picker)
+        navigate = self._move_on_from(task)
+        self.tasks = [t for t in self.tasks if t.id != task_id]
+        navigate()
+        self.draw(force=True, partial=True)
+        try:
+            self.client.delete_task(task_id)
+        except MindwtrError as exc:
+            print("delete failed: %s" % exc, file=sys.stderr)
+            self.tasks = self.tasks + [task]
+            self.mode, self.detail_task_id, self.picker = screen
+            if self.stale_since is None:
+                self.stale_since = datetime.now()
+            self.draw(force=True, partial=True)
+            return
+        self.refresh()
+        self.draw(partial=True)
 
     def _next_inbox(self, task: Task) -> Optional[str]:
         """The inbox task listed after `task`, in the inbox list's own order

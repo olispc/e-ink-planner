@@ -255,6 +255,12 @@ class FixtureClient:
         return ""
 
     def complete(self, task_id: str) -> None:
+        # As the server: done (it stays fetched, for the Done tab) and starless.
+        tasks = [replace(t, status="done", focused=False, completed_at=datetime.now())
+                 if t.id == task_id else t for t in self._store.tasks]
+        self._store = replace(self._store, tasks=tasks)
+
+    def delete_task(self, task_id: str) -> None:
         tasks = [t for t in self._store.tasks if t.id != task_id]
         self._store = replace(self._store, tasks=tasks)
 

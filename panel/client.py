@@ -7,6 +7,7 @@ task-sync-schema.ts rather than guessed:
   GET   /v1/areas              -> {"areas": [...]}
   POST  /v1/tasks/<id>/complete
   PATCH /v1/tasks/<id>         -> {"task": {...}}
+  DELETE /v1/tasks/<id>        -> soft delete: sets deletedAt, recoverable
   HEAD  /v1/data               -> ETag header, no body
 `/v1/data` is the whole-store sync endpoint the native apps use; its ETag is
 built from the store file's stat (inode/size/mtime/ctime — server-data-cache.ts)
@@ -21,7 +22,10 @@ but done and archived (pickTaskList, server-validation.ts) — which is what
 fetch() asks for: one request covers every view the panel can switch to, so a
 tab change never waits on the network. List and single-task responses already
 carry every field the task has, including `description` and `checklist` — no
-separate detail endpoint is needed to get them.
+separate detail endpoint is needed to get them. Done tasks need `all=1` as
+well as `status=done` (without it pickTaskList excludes done whatever the
+status asks); they stay "done" only until Mindwtr's autoArchiveDays moves them
+to archived, so that list is the recently completed ones and stays short.
 
 Statuses are inbox, next, waiting, someday, reference, done, archived
 (TASK_STATUS_VALUES, task-status.ts). status, projectId, areaId, dueDate and
@@ -105,6 +109,12 @@ class Task:
     status: str = "next"
     project_id: Optional[str] = None
     area_id: Optional[str] = None
+    # When a done task was completed, and which recurring series it belongs
+    # to (recurrence.seriesId, or its own id for an older plain-rule task;
+    # None if it doesn't repeat) — what restoring it needs to find the next
+    # occurrence completing it generated (see Panel._restore_task).
+    completed_at: Optional[datetime] = None
+    series_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -176,6 +186,15 @@ class MindwtrClient:
         if not r.ok:
             raise MindwtrError("complete %s: HTTP %s" % (task_id, r.status_code))
 
+    def delete_task(self, task_id: str) -> None:
+        """Soft delete (deletedAt), as the apps' own delete is."""
+        try:
+            r = self.session.delete("%s/v1/tasks/%s" % (self.base, task_id), timeout=TIMEOUT)
+        except requests.RequestException as exc:
+            raise MindwtrError("delete failed: %s" % exc) from exc
+        if not r.ok:
+            raise MindwtrError("delete %s: HTTP %s" % (task_id, r.status_code))
+
     def update_task(self, task_id: str, fields: Dict[str, Any]) -> None:
         """PATCH any of the task's own fields. null clears one (dueDate,
         projectId, areaId)."""
@@ -189,12 +208,16 @@ class MindwtrClient:
             raise MindwtrError("update %s: HTTP %s %s" % (task_id, r.status_code, r.text[:120]))
 
     def fetch(self, limit: int) -> Store:
-        """Every open task, named. Which of them a view shows is decided on
-        the panel (layout.select_view), not by the query."""
-        body = self._get("/v1/tasks", {"limit": limit})
-        raw = body.get("tasks", [])
-        if body.get("total", len(raw)) > len(raw):
-            print("fetched %d of %s open tasks" % (len(raw), body.get("total")), file=sys.stderr)
+        """Every open task and every done one, named. Which of them a view
+        shows is decided on the panel (layout.select_view), not by the query."""
+        raw = []
+        for params, what in (({"limit": limit}, "open"),
+                             ({"status": "done", "all": "1", "limit": limit}, "done")):
+            body = self._get("/v1/tasks", params)
+            got = body.get("tasks", [])
+            if body.get("total", len(got)) > len(got):
+                print("fetched %d of %s %s tasks" % (len(got), body.get("total"), what), file=sys.stderr)
+            raw += got
         projects = [
             Project(id=p["id"], title=label(p), area_id=p.get("areaId") or None)
             for p in self._get("/v1/projects").get("projects", [])
@@ -232,12 +255,26 @@ class MindwtrClient:
                     status=t.get("status") or "inbox",
                     project_id=t.get("projectId") or None,
                     area_id=t.get("areaId") or None,
+                    completed_at=_parse_iso(t.get("completedAt")),
+                    series_id=_series_id(t),
                 ),
                 projects, areas,
             )
             for t in raw
         ]
         return Store(tasks=tasks, areas=areas, projects=projects)
+
+
+def _series_id(t: Dict[str, Any]) -> Optional[str]:
+    """The recurring series a raw task belongs to, as Mindwtr's own undo
+    reads it (undo-task-completion.ts): recurrence.seriesId, falling back to
+    the task's id; a bare rule string is a series of its own id."""
+    recurrence = t.get("recurrence")
+    if isinstance(recurrence, dict):
+        return (recurrence.get("seriesId") or "").strip() or t["id"]
+    if isinstance(recurrence, str) and recurrence:
+        return t["id"]
+    return None
 
 
 def checklist_field(checklist: List[ChecklistItem]) -> List[Dict[str, Any]]:

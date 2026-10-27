@@ -67,10 +67,25 @@ in is the difference between a planner and a random sample.
 Nothing starred is not a failure state — the panel is then simply next actions,
 so the focus flag earns its place without being load-bearing.
 
-The header's first four icons are view tabs, in Mindwtr's own sidebar order and
-with its icons: Focus, Inbox (with a count), Waiting and Someday. `PANEL_VIEW`
-picks the one it starts on. The panel fetches every open task in one request and
-splits it locally, so switching tab never waits on the network.
+The header's first five icons are view tabs, in Mindwtr's own sidebar order and
+with its icons: Focus, Inbox (with a count), Waiting, Someday and Done. `PANEL_VIEW`
+picks the one it starts on. Swiping along the header bar moves between them,
+left for the next tab, right for the previous. The panel fetches every open task, and the recently
+done ones, up front and splits them locally, so switching tab never waits on the
+network.
+
+An inbox task can also be deleted from that view: the trash button at the end of
+the status row needs a second tap to confirm, and the task goes to Mindwtr's
+Trash rather than vanishing.
+
+**Locked, away for a while?** Swipe right on the lock screen's clock to hide the
+time and date; the panel then sits on the picture alone and never redraws.
+Swipe left to bring the clock back, or tap to unlock as usual.
+
+**Done** lists recently completed tasks, newest first, and is where a mistaken
+tick is undone: tapping a task's tick there restores it. A task ticked on the
+panel goes back to exactly the status and star it had; one ticked on another
+device goes back to Next.
 
 **Processing the inbox.** Tapping an inbox task opens it with three rows (project
 or area, contexts, due date), each of which opens a picker of what Mindwtr

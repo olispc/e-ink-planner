@@ -33,8 +33,14 @@ class FakeClient(MindwtrClient):
             ]}
         if path == "/v1/areas":
             return {"areas": [{"id": "a1", "name": "Digital"}, {"id": "a2", "name": "Home"}]}
-        # No status filter: every open task, as pickTaskList returns them.
-        return {"tasks": list(self._tasks), "total": len(self._tasks)}
+        # As pickTaskList: no status filter is every open task; done tasks
+        # need status=done and all=1.
+        params = params or {}
+        if params.get("status") == "done" and params.get("all") == "1":
+            tasks = [t for t in self._tasks if t.get("status") == "done"]
+        else:
+            tasks = [t for t in self._tasks if t.get("status") != "done"]
+        return {"tasks": tasks, "total": len(tasks)}
 
     def _head(self, path):
         if path == "/v1/data":
@@ -146,6 +152,37 @@ class TestApplyFields(unittest.TestCase):
         })
         self.assertEqual((t.status, t.contexts, t.focused), ("next", ["@home"], True))
         self.assertEqual(t.checklist, [ChecklistItem("c1", "x", False)])
+
+
+class TestDone(unittest.TestCase):
+    def test_done_tasks_come_with_when_and_their_series(self):
+        client = FakeClient([
+            raw("a"),
+            raw("b", status="done", completedAt="2026-10-22T09:00:00Z",
+                recurrence={"rule": "daily", "seriesId": "s1"}),
+            raw("c", status="done", completedAt="2026-10-22T10:00:00Z", recurrence="weekly"),
+        ])
+        tasks = {t.id: t for t in client.fetch(50).tasks}
+        self.assertEqual(set(tasks), {"a", "b", "c"})
+        self.assertEqual((tasks["b"].series_id, tasks["c"].series_id, tasks["a"].series_id),
+                         ("s1", "c", None))
+        self.assertIsNotNone(tasks["b"].completed_at)
+
+    def test_the_done_view_is_newest_completion_first_and_focus_never_shows_done(self):
+        client = FakeClient([
+            raw("old", status="done", completedAt="2026-10-20T09:00:00Z"),
+            raw("new", status="done", completedAt="2026-10-22T09:00:00Z", isFocusedToday=True),
+            raw("open"),
+        ])
+        self.assertEqual([t.id for t in view(client, "done")], ["new", "old"])
+        self.assertEqual([t.id for t in view(client, "focus")], ["open"])
+
+    def test_delete_is_a_delete(self):
+        client = MindwtrClient("http://stub", "t")
+        with mock.patch.object(client.session, "delete") as delete:
+            delete.return_value.ok = True
+            client.delete_task("a")
+        self.assertEqual(delete.call_args.args, ("http://stub/v1/tasks/a",))
 
 
 class TestLocalTime(unittest.TestCase):

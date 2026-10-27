@@ -74,7 +74,7 @@ def main() -> int:
     ap.add_argument("--out", type=Path, default=Path("local/preview.png"))
     ap.add_argument("--dark", action="store_true", help="dark mode (inverted)")
     ap.add_argument("--touch-locked", action="store_true", help="draw the touch lock as engaged")
-    ap.add_argument("--lock", choices=["face", "keypad"],
+    ap.add_argument("--lock", choices=["face", "keypad", "hidden"],
                     help="draw the lock screen instead of the list")
     ap.add_argument("--lock-image", type=Path,
                     help="lock-screen background (default: today's from PANEL_LOCK_IMAGES)")
@@ -105,7 +105,7 @@ def main() -> int:
         image = render_lock(
             portrait=portrait, keypad=args.lock == "keypad", entered=2,
             code_length=len(config.passcode) or 4, dark=args.dark,
-            background=load_background(source, size),
+            background=load_background(source, size), clock=args.lock != "hidden",
         ).image
     elif args.open:
         task = listed_order(tasks, False, True, False, False, False)[args.open - 1]

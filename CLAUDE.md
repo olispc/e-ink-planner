@@ -128,7 +128,12 @@ dropped — so a vertical drag no longer fires a tap where the finger lifted.
 Page turns are partial refreshes like every other update. On a task's
 detail view a right swipe from its first page (or with no pager) is "back"
 instead of wrapping to the last page — it borrows the header's `back` box
-the same way, so the touch lock gates it like the tap.
+the same way, so the touch lock gates it like the tap. A swipe that *starts* on the
+header bar (`Gesture.y` is the stroke's start; above `header_h`, both portrait
+rows included) switches view tabs instead — left for the next (Focus → Inbox →
+… → Done), right for the previous, wrapping like the pagers — by borrowing the
+target tab's own `view` hitbox, so it does what tapping that tab does, from
+any screen.
 
 **The detail view's description gets real space, not one truncated line —
 but never at the checklist's expense.** `_wrap_paragraphs()` wraps the whole
@@ -186,14 +191,17 @@ the pickers, so the locks and dark mode are reachable without leaving a task
 and the bars can't drift apart. The view toggles still apply to the list you
 return to.
 
-It starts with four **view tabs** where a title used to be — Focus, Inbox,
-Waiting, Someday (`layout.VIEW_TABS`), in Mindwtr's own sidebar order and drawn
-as its icons (Lucide `Target`, `Inbox`, `PauseCircle`, `Clock3`, read off
-`Layout.tsx` and `task-status-icons.ts`). Next has no tab: Focus already ends
-in every next action. The tabs are bare icons with only the active one boxed
+It starts with five **view tabs** where a title used to be — Focus, Inbox,
+Waiting, Someday, Done (`layout.VIEW_TABS`), in Mindwtr's own sidebar order and
+drawn as its icons (Lucide `Target`, `Inbox`, `PauseCircle`, `Clock3`, `Check`,
+read off `Layout.tsx` and `task-status-icons.ts`). Next has no tab: Focus
+already ends in every next action. In landscape the cluster starts at
+`CLUSTER_X`, far enough right for the five tabs to get ~46px each; portrait's
+get ~48 (above the 46px tap floor). The tabs are bare icons with only the active one boxed
 (heavy border), so they don't read as more toggles; in landscape, where they
 share the cluster's row, a hairline separates the two. The inbox tab carries a
-count badge. The active tab is "home" in the list (list page back to 0 — the
+count badge, shifted left as far as a wide count needs to stay inside its own
+tab's slot. The active tab is "home" in the list (list page back to 0 — the
 toggles below are deliberately left alone, since a stray tap shouldn't undo a
 view you set up on purpose) and "back" in the detail view; in a picker it is a
 plain link to its list, because the picker's own title row is its "back". Any
@@ -271,6 +279,14 @@ text so neither can ever collide with it:
   `from_env`), so no reboot, pulled plug or lost state file is a way past it —
   deliberately not saved state, which a restart while unlocked would bypass. No passcode set
   means a tap unlocks — it still hides the list, said on stderr at startup.
+  A swipe right on the clock face hides the time and date
+  (`Panel.lock_clock_hidden`): just the picture, or blank without one, and a
+  signature with no minute in it, so the panel holds one image indefinitely
+  while you're away; a swipe left brings the clock back. Both are thorough full
+  refreshes (digits off a photo by partial is the stencilled-ghost case above).
+  Swipes are ignored on the keypad; a tap still wakes it, and it folds back to
+  whichever face it came from. Locking again always starts with the clock.
+  Lock-screen swipes are handled before the touch lock's swipe gate, like taps.
 
 **Focus-sticky always wins when it's on** — starred-today tasks form their
 own flat leading section, sorted by `sort_newest` but never bucketed by
@@ -317,7 +333,15 @@ through. Single choices (where, due) return to the task; contexts stay open,
 being several. Sending a task on, or ticking it done, opens the next inbox task
 in the list's own order (`_next_inbox()`, wrapping to the top so skipped tasks
 come round again), or returns to the inbox when none is left, so the inbox is
-worked top to bottom without a tap per item. A swipe left on an inbox task
+worked top to bottom without a tap per item. The status row ends in a square
+trash button (inbox processing only, not the Edit screen): its first tap arms
+it, turning the row into "Delete — tap again" and Cancel, and only a second tap
+on it deletes — any other tap or opening another task disarms
+(`Panel.delete_armed`), so brushing the wall can't throw a task away. Delete is
+`DELETE /v1/tasks/:id`, soft: the task lands in Mindwtr's Trash, restorable from
+the app. It moves on to the next inbox task like a status does
+(`_move_on_from()`). There was no room for a separate row in landscape, which is
+why it shares the status row. A swipe left on an inbox task
 skips it — the next one opens and nothing is written; its processing view has
 no pager for that swipe to have meant instead. A swipe right
 leaves a picker like any detail view, except the date picker, whose swipes turn
@@ -325,15 +349,19 @@ the month (its pager); its title row is the way back. A checklist on an inbox
 task isn't shown while it is being processed.
 
 **The detail view's title is a block of its own.** Its checkbox and star are
-centred on the title text (cap top of the first line to baseline of the last),
-however many lines it wraps to, and a thin rule closes it off; the star's tap
-column runs the title's full height.
+centred on the title text (cap top of the first line to baseline of the last,
+as the 1-bit render actually inks them — `_glyph_ink_box()`), however many lines
+it wraps to, and a thin rule closes it off with `DETAIL_TITLE_PAD` blank rows
+both above the block (under the header's rule) and below it; descenders hang
+into the lower pad, as they would in print. The star's tap column runs the
+title's full height.
 
 **Any task can be edited from its detail view.** Outside the inbox, under the
 title's rule sits the Edit screen's rows in miniature (`DETAIL_INFO_LINE_H`,
 about half a row): where it's filed, its contexts, its due date, each behind the
-same icon centred under the title's checkbox (`FIELD_ICON_CX`) with its text
-in line with the title
+same icon centred under the title's checkbox (`FIELD_ICON_CX`, which the
+checklist's boxes centre on too, their text also starting at `TEXT_X`) with its
+text in line with the title
 (`_field_rows()` / `_draw_field_icon()`, shared with the processing rows) —
 but only the ones that are set. No placeholders on the detail view, and an unset
 field costs no height, which matters most in landscape where every pixel is a
@@ -347,6 +375,29 @@ status row with the current status boxed heavily. `Panel.editing` makes a picker
 opened from Edit return to Edit (on a choice, "back" or a swipe right) rather
 than to the task; one more "back" leaves Edit. A status chosen from Edit is just
 a change and returns to the task — only an inbox task's moves on.
+
+**Done is where an accidental tick is put back.** `fetch()` also asks for
+`status=done&all=1` (without `all=1` the list route drops done tasks whatever
+the status asks) — a short list by nature, since Mindwtr moves done tasks to
+archived after `autoArchiveDays`. The Done tab lists them newest completion
+first, ignoring the sort and group toggles, each row ticked (title left plain:
+struck text is hard reading on e-ink), "done Nm ago" leading its meta line, and
+no star. Its checkbox is "restore": the tick lifts for a beat, then the row
+leaves Done. A done task's detail view restores from its checkbox the same way.
+Completing a task now marks it done locally (starless, as the server does)
+rather than dropping it, so it is in Done at once. Restoring follows
+Mindwtr's own undo (`undo-task-completion.ts`): the previous status, the star
+back if it had one (the server refuses one over the focus limit — logged,
+fine), and for a recurring task, deleting the occurrence completing generated
+(same series id, `createdAt` equal to the done task's `completedAt`; the delete
+is soft). The status write goes first, so a failure changes nothing; the
+occurrence's delete comes after. Neither the status nor the star before
+completion is stored on the task — Mindwtr's own undo only knows them from its
+toast — so `Panel.completions` remembers them for each task completed on the
+panel, saved in `local/state.json` (the latest `COMPLETIONS_KEPT`). A task
+completed elsewhere restores to next, unstarred.
+TODO(oli): confirm on a real recurring task that restoring removes the
+occurrence it generated — source says the cloud stamps it the same way.
 
 **Every edit is one `PATCH` through one path.** `client.apply_fields()` is the
 single mapping from API field names onto `Task`; `Panel._patch_task()` uses it
@@ -369,7 +420,7 @@ completion on the phone should show up on the wall in seconds, not
 `PANEL_POLL_SECONDS`. `HEAD /v1/data`'s ETag is built from the store file's
 stat (verified against `server-data-cache.ts`) — one filesystem `stat()`,
 changes on any write from any device. `Panel.run()` checks it every
-`PANEL_CHECK_SECONDS` and only does the expensive 3-request `fetch()` when it
+`PANEL_CHECK_SECONDS` and only does the expensive 4-request `fetch()` when it
 actually moves; `PANEL_POLL_SECONDS` stays as a dumb fallback regardless.
 mindwtr-cloud has no push (no SSE/WebSocket) — this is the closest thing to
 it over plain REST.

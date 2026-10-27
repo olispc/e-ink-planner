@@ -924,10 +924,11 @@ class TestPortrait(unittest.TestCase):
         # than run under it.
         rendered = render(self.tasks(), "focus", portrait=True)
         tabs = [b for b in rendered.hitboxes if b.kind in ("home", "view")]
-        self.assertEqual(len(tabs), 4)
+        self.assertEqual(len(tabs), 5)
         self.assertLess(max(b.x1 for b in tabs), 300)
+        from panel.theme import DETAIL_ROW_H
         for b in tabs:
-            self.assertGreaterEqual(b.x1 - b.x0, 50)   # a real thumb target
+            self.assertGreaterEqual(b.x1 - b.x0, DETAIL_ROW_H)   # the ~9mm tap floor
 
     def test_detail_checklist_fits_more_items(self):
         r = render_detail(task(1, checklist=[item(n) for n in range(30)]), portrait=True)
@@ -951,6 +952,7 @@ class TestViewTabs(unittest.TestCase):
         tabs = [b for b in render([task(1)], "inbox").hitboxes if b.kind in ("home", "view")]
         self.assertEqual([(b.kind, b.key) for b in sorted(tabs, key=lambda b: b.x0)], [
             ("view", "focus"), ("home", "inbox"), ("view", "waiting"), ("view", "someday"),
+            ("view", "done"),
         ])
 
     def test_landscape_tabs_end_before_the_control_cluster(self):
@@ -999,7 +1001,7 @@ class TestProcessingView(unittest.TestCase):
     def test_checkbox_and_star_are_centred_on_the_title_however_long(self):
         from panel.theme import BOX_X, DETAIL_STAR_ZONE_W
         # No descenders, so the text's dark extent is cap top to baseline.
-        for title in ("Short", "Some words that wrap " * 2, "Some words " * 12):
+        for title in ("Short", "Some words that run on and on " * 2, "Some words " * 12):
             for portrait in (False, True):
                 r = render_detail(task(1, title=title), portrait=portrait)
                 complete = self.kinds(r, "complete")[0]
@@ -1038,6 +1040,43 @@ class TestProcessingView(unittest.TestCase):
         icons = ink_cols(info.y0 + 2, info.y1 - 6)
         self.assertEqual((box[0] + box[-1]) / 2, (icons[0] + icons[-1]) / 2)
 
+    def test_the_title_has_equal_padding_above_and_below(self):
+        # Blank rows from the header's rule to the block's first ink, and from
+        # its last ink to its own rule. No descenders in these titles: the pad
+        # is measured to the baseline, so a descender hangs into it.
+        for title in ("Short", "Some words that run on and on " * 2, "Some words " * 12):
+            for portrait in (False, True):
+                img = render_detail(task(1, title=title), portrait=portrait).image
+                px, w = img.load(), img.size[0]
+                rule = lambda y: sum(px[x, y] == BLACK for x in range(w)) > w * 0.8  # noqa: E731
+                ink = lambda y: any(px[x, y] == BLACK for x in range(w))           # noqa: E731
+                y = 40
+                while not rule(y):
+                    y += 1
+                while rule(y):
+                    y += 1
+                header_end = y
+                while not ink(y):
+                    y += 1
+                above = y - header_end
+                while not rule(y):
+                    y += 1
+                b = y - 1
+                while not ink(b):
+                    b -= 1
+                self.assertEqual(above, y - b - 1, (title, portrait))
+
+    def test_checklist_boxes_centre_under_the_title_checkbox(self):
+        r = render_detail(task(1, checklist=[item(1), item(2, completed=True)]), expanded=True)
+        px = r.image.load()
+        complete = self.kinds(r, "complete")[0]
+        def ink_cols(y0, y1):
+            return [x for x in range(0, TEXT_X) if any(px[x, y] == BLACK for y in range(y0, y1))]
+        title_box = ink_cols(complete.y0, complete.y1 - 2)
+        for toggle in self.kinds(r, "toggle"):
+            cols = ink_cols(toggle.y0 + 4, toggle.y1 - 4)
+            self.assertEqual((cols[0] + cols[-1]) / 2, (title_box[0] + title_box[-1]) / 2)
+
     def test_unset_fields_take_no_room_but_edit_stays_reachable(self):
         full = task(1, project="P", contexts=["@a"], created_at=datetime(2026, 9, 1),
                     due_date=datetime(2026, 10, 24))
@@ -1072,6 +1111,38 @@ class TestProcessingView(unittest.TestCase):
             r = render_detail(t, portrait=portrait, view="inbox")
             bottom = (800 if portrait else HEIGHT) - COLLAPSED_FOOTER_H
             self.assertLessEqual(max(b.y1 for b in self.kinds(r, "set_status")), bottom)
+
+
+class TestDoneView(unittest.TestCase):
+    def done(self, n, **kw):
+        return replace(task(n, **kw), status="done", completed_at=datetime(2026, 10, 22, 9))
+
+    def test_rows_restore_from_the_checkbox_and_have_no_star(self):
+        r = render([self.done(1), self.done(2)], "done", now=datetime(2026, 10, 22, 11))
+        kinds = [b.kind for b in r.hitboxes if b.y0 >= HEADER_H]
+        self.assertEqual(kinds.count("restore"), 2)
+        self.assertEqual(kinds.count("complete") + kinds.count("star"), 0)
+
+    def test_the_row_being_restored_shows_unticked(self):
+        rows = [self.done(1)]
+        ticked = render(rows, "done").image
+        lifting = render(rows, "done", completing="task-1").image
+        self.assertNotEqual(ticked.tobytes(), lifting.tobytes())
+
+    def test_a_done_tasks_detail_restores_and_has_no_star(self):
+        r = render_detail(self.done(1))
+        kinds = {b.kind for b in r.hitboxes}
+        self.assertIn("restore", kinds)
+        self.assertNotIn("complete", kinds)
+        self.assertNotIn("star", kinds)
+
+    def test_done_age_reads_in_minutes_and_hours_today(self):
+        from panel.layout import _relative_done
+        now = datetime(2026, 10, 22, 12, 0)
+        self.assertEqual(_relative_done(datetime(2026, 10, 22, 11, 59, 40), now), "done just now")
+        self.assertEqual(_relative_done(datetime(2026, 10, 22, 11, 35), now), "done 25m ago")
+        self.assertEqual(_relative_done(datetime(2026, 10, 22, 9, 0), now), "done 3h ago")
+        self.assertEqual(_relative_done(datetime(2026, 10, 21, 23, 0), now), "done yesterday")
 
 
 class TestPickers(unittest.TestCase):

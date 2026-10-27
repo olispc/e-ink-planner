@@ -3,7 +3,10 @@
 Two faces, both static frames like everything else on this panel:
 
 - the clock face — time, date and an optional background picture, no hint
-  text: what a tap on a wall clock does is learned once.
+  text: what a tap on a wall clock does is learned once. With the clock
+  hidden (`clock=False`, a swipe right on the panel) it is just the picture,
+  or a blank screen without one: nothing on it changes, so the panel holds
+  one image for as long as you're away.
   The whole screen is one tap target ("lock_wake") that brings up...
 - the keypad face — a smaller clock, one dot per digit of the code, any
   message ("Wrong code"), and a 3x4 keypad: 1-9, then cancel / 0 / delete.
@@ -169,6 +172,7 @@ def render_lock(
     message: Optional[str] = None,
     background: Optional[Image.Image] = None,
     dark: bool = False,
+    clock: bool = True,
 ) -> Rendered:
     """`background` is an already-dithered canvas-sized picture (see
     load_background), or None for a plain clock. `code_length` is 0 when no
@@ -182,6 +186,9 @@ def render_lock(
     img = background.copy() if background is not None else Image.new("1", (g.width, g.height), WHITE)
     d = ImageDraw.Draw(img)
     on_picture = background is not None
+
+    if not keypad and not clock:
+        return _finish(img, [Hitbox("lock_wake", 0, g.width, 0, g.height)], dark and not on_picture)
 
     if not keypad:
         # Over a picture in portrait the clock goes up top, phone-style, so it

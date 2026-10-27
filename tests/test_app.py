@@ -8,7 +8,7 @@ import sys
 import tempfile
 import unittest
 from dataclasses import replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -41,11 +41,20 @@ class StubClient:
         self.areas = list(areas)
         self.projects = list(projects)
         self.writes = []
+        self.deleted = []
 
     def fetch(self, limit):
         return Store(tasks=list(self.tasks), areas=self.areas, projects=self.projects)
 
     def complete(self, task_id):
+        # As the server: done (fetched with the rest) and starless.
+        self.tasks = [
+            replace(t, status="done", focused=False, completed_at=datetime.now())
+            if t.id == task_id else t for t in self.tasks
+        ]
+
+    def delete_task(self, task_id):
+        self.deleted.append(task_id)
         self.tasks = [t for t in self.tasks if t.id != task_id]
 
     def update_task(self, task_id, fields):
@@ -913,6 +922,225 @@ def tap(panel, kind, key=None):
     """Tap the middle of the first box of `kind` (and `key`, if given)."""
     box = next(b for b in panel.hitboxes if b.kind == kind and (key is None or b.key == key))
     panel.handle_tap(((box.x0 + box.x1) // 2, (box.y0 + box.y1) // 2))
+
+
+class TestHeaderSwipes(unittest.TestCase):
+    def _panel(self, rotation=0):
+        panel = make_panel([task(1), task(2, status="inbox")], rotation=rotation)
+        panel.refresh()
+        panel.draw(force=True)
+        return panel
+
+    def test_swiping_the_header_turns_the_tabs_and_wraps(self):
+        for rotation, y in ((0, 30), (270, 90)):        # portrait's second header row too
+            panel = self._panel(rotation)
+            seen = []
+            for _ in range(5):
+                panel.handle_gesture(Gesture("swipe", 300, y, dx=-300))
+                seen.append(panel.view)
+            self.assertEqual(seen, ["inbox", "waiting", "someday", "done", "focus"])
+            panel.handle_gesture(Gesture("swipe", 300, y, dx=300))
+            self.assertEqual(panel.view, "done")
+
+    def test_below_the_header_a_swipe_still_pages(self):
+        panel = make_panel([task(i) for i in range(25)])
+        panel.refresh()
+        panel.draw(force=True)
+        panel.handle_gesture(Gesture("swipe", 300, 300, dx=-300))
+        self.assertEqual((panel.view, panel.list_page), ("focus", 1))
+
+    def test_from_a_task_a_header_swipe_goes_to_the_next_tabs_list(self):
+        panel = self._panel()
+        tap(panel, "open")
+        panel.handle_gesture(Gesture("swipe", 300, 30, dx=-300))
+        self.assertEqual((panel.mode, panel.view), ("list", "inbox"))
+
+    def test_the_touch_lock_stops_header_swipes(self):
+        panel = self._panel()
+        tap(panel, "toggle_touch_lock")
+        panel.handle_gesture(Gesture("swipe", 300, 30, dx=-300))
+        self.assertEqual(panel.view, "focus")
+
+
+class TestDeleteFromInbox(unittest.TestCase):
+    def _panel(self):
+        panel = make_panel([], view="inbox")
+        panel.client = StubClient([task(i, status="inbox", created_at=datetime(2026, 10, i))
+                                   for i in (1, 2)])
+        panel.refresh()
+        panel.draw(force=True)
+        tap(panel, "open")
+        self.assertEqual(panel.detail_task_id, "task-1")
+        return panel
+
+    def test_the_first_tap_only_arms_and_the_second_deletes_and_moves_on(self):
+        panel = self._panel()
+        tap(panel, "delete_task")
+        self.assertEqual((panel.delete_armed, panel.client.deleted), ("task-1", []))
+        tap(panel, "delete_task")
+        self.assertEqual(panel.client.deleted, ["task-1"])
+        self.assertEqual(panel.detail_task_id, "task-2")
+        self.assertIsNone(panel.delete_armed)
+
+    def test_cancel_or_any_other_tap_disarms(self):
+        panel = self._panel()
+        tap(panel, "delete_task")
+        tap(panel, "delete_cancel")
+        self.assertIsNone(panel.delete_armed)
+        tap(panel, "delete_task")
+        tap(panel, "toggle_dark")
+        self.assertIsNone(panel.delete_armed)
+        tap(panel, "delete_task")                    # arms again, doesn't delete
+        self.assertEqual(panel.client.deleted, [])
+
+    def test_skipping_away_disarms(self):
+        panel = self._panel()
+        tap(panel, "delete_task")
+        panel.handle_gesture(Gesture("swipe", 300, 400, dx=-300))
+        self.assertIsNone(panel.delete_armed)
+
+    def test_a_failed_delete_puts_it_back(self):
+        panel = self._panel()
+
+        def fail(task_id):
+            from panel.client import MindwtrError
+            raise MindwtrError("boom")
+
+        panel.client.delete_task = fail
+        tap(panel, "delete_task")
+        tap(panel, "delete_task")
+        self.assertIsNotNone(panel._find("task-1"))
+        self.assertEqual(panel.detail_task_id, "task-1")
+        self.assertIsNotNone(panel.stale_since)
+
+    def test_only_inbox_processing_offers_delete(self):
+        panel = make_panel([task(1)])
+        panel.refresh()
+        panel.draw(force=True)
+        tap(panel, "open")
+        tap(panel, "pick", "edit")
+        self.assertFalse(any(b.kind == "delete_task" for b in panel.hitboxes))
+
+
+class TestLockClockHidden(unittest.TestCase):
+    def _locked(self):
+        panel = make_panel([task(1)], passcode="1234")
+        panel.refresh()
+        panel.draw(force=True)
+        tap(panel, "lock_screen")
+        return panel
+
+    def test_swipe_right_hides_the_clock_and_left_brings_it_back(self):
+        panel = self._locked()
+        clock = panel.display.shown[-1].tobytes()
+        panel.handle_gesture(Gesture("swipe", 200, 300, dx=300))
+        self.assertTrue(panel.lock_clock_hidden)
+        self.assertNotEqual(panel.display.shown[-1].tobytes(), clock)
+        panel.handle_gesture(Gesture("swipe", 200, 300, dx=-300))
+        self.assertFalse(panel.lock_clock_hidden)
+        self.assertEqual(panel.display.shown[-1].tobytes(), clock)
+
+    def test_the_hidden_face_never_ticks(self):
+        panel = self._locked()
+        panel.handle_gesture(Gesture("swipe", 200, 300, dx=300))
+        shown = len(panel.display.shown)
+        later = datetime.now() + timedelta(minutes=5)
+        with mock.patch("panel.app.datetime") as fake:
+            fake.now.return_value = later
+            panel.tick()
+        self.assertEqual(len(panel.display.shown), shown)
+
+    def test_a_tap_still_wakes_the_keypad_and_it_folds_back_hidden(self):
+        panel = self._locked()
+        panel.handle_gesture(Gesture("swipe", 200, 300, dx=300))
+        tap(panel, "lock_wake")
+        self.assertTrue(panel.lock_keypad)
+        panel.handle_gesture(Gesture("swipe", 200, 300, dx=-300))   # ignored on the keypad
+        self.assertTrue(panel.lock_clock_hidden)
+        tap(panel, "lock_key", "cancel")
+        self.assertEqual((panel.lock_keypad, panel.lock_clock_hidden), (False, True))
+
+    def test_locking_again_starts_with_the_clock(self):
+        panel = self._locked()
+        panel.handle_gesture(Gesture("swipe", 200, 300, dx=300))
+        tap(panel, "lock_wake")
+        for digit in "1234":
+            tap(panel, "lock_key", digit)
+        self.assertFalse(panel.screen_locked)
+        tap(panel, "lock_screen")
+        self.assertFalse(panel.lock_clock_hidden)
+
+
+class TestDoneAndRestore(unittest.TestCase):
+    def _panel(self, tasks, **kw):
+        panel = make_panel([], **kw)
+        panel.client = StubClient(tasks)
+        panel.refresh()
+        panel.draw(force=True)
+        return panel
+
+    def _complete(self, panel, task_id):
+        with mock.patch("panel.app.time.sleep"):
+            panel._complete_task(task_id)
+
+    def _restore(self, panel, task_id):
+        with mock.patch("panel.app.time.sleep"):
+            panel._restore_task(task_id)
+
+    def test_a_panel_completion_lands_in_done_and_restores_status_and_star(self):
+        panel = self._panel([task(1, status="waiting", focused=True), task(2)])
+        self._complete(panel, "task-1")
+        tap(panel, "view", "done")
+        self.assertEqual([b.task_id for b in panel.hitboxes if b.kind == "restore"], ["task-1"])
+        self._restore(panel, "task-1")
+        restored = panel._find("task-1")
+        self.assertEqual((restored.status, restored.focused), ("waiting", True))
+        self.assertEqual(panel.client.writes[-2:], [
+            ("task-1", {"status": "waiting"}), ("task-1", {"isFocusedToday": True}),
+        ])
+        self.assertNotIn("task-1", panel.completions)
+
+    def test_a_task_completed_elsewhere_restores_to_next_unstarred(self):
+        done = replace(task(1), status="done", completed_at=datetime(2026, 10, 22, 9))
+        panel = self._panel([done])
+        self._restore(panel, "task-1")
+        self.assertEqual(panel.client.writes, [("task-1", {"status": "next"})])
+
+    def test_restoring_a_recurring_task_removes_the_occurrence_it_generated(self):
+        when = datetime(2026, 10, 22, 9)
+        done = replace(task(1), status="done", completed_at=when, series_id="s1")
+        follow = replace(task(2), created_at=when, series_id="s1")
+        other = replace(task(3), created_at=datetime(2026, 10, 1), series_id="s1")
+        panel = self._panel([done, follow, other])
+        self._restore(panel, "task-1")
+        self.assertEqual(panel.client.deleted, ["task-2"])
+        self.assertIsNotNone(panel._find("task-3"))
+
+    def test_a_failed_restore_leaves_it_done(self):
+        done = replace(task(1), status="done", completed_at=datetime(2026, 10, 22, 9))
+        panel = self._panel([done])
+
+        def fail(task_id, fields):
+            from panel.client import MindwtrError
+            raise MindwtrError("boom")
+
+        panel.client.update_task = fail
+        self._restore(panel, "task-1")
+        self.assertEqual(panel._find("task-1").status, "done")
+        self.assertIsNotNone(panel.stale_since)
+
+    def test_completions_are_saved_across_restarts_and_capped(self):
+        from panel import app as app_module
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "state.json"
+            panel = self._panel([task(i, status="inbox") for i in range(5)], state_path=state)
+            with mock.patch.object(app_module, "COMPLETIONS_KEPT", 3):
+                for i in range(5):
+                    self._complete(panel, "task-%d" % i)
+            saved = json.loads(state.read_text())["completions"]
+            self.assertEqual(list(saved), ["task-2", "task-3", "task-4"])
+            again = make_panel([], state_path=state)
+            self.assertEqual(again.completions["task-4"], ["inbox", False])
 
 
 class TestFilingAnyTask(unittest.TestCase):
